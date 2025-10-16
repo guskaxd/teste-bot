@@ -1,4 +1,5 @@
 //MERCADOPAGO_ACCESS_TOKEN=APP_USR-7929289745143619-091818-2fb545021b8477af0320c5b1182f97e5-85299269
+//url: teste-ghost-production.up.railway.app
 const {
     Client,
     GatewayIntentBits,
