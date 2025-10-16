@@ -1064,7 +1064,7 @@ app.post('/webhook-mercadopago', async (req, res) => {
                         console.log(`[Bônus] Nenhuma indicação válida, bônus já pago ou usuário não é novo. Nenhuma ação para ${userId}.`);
                     }
                 }
-                const duration = (Number(valorPago) === 100 || (balanceUsed && Number(valorPago) + Number(balanceUsed) === 100)) ? 7 : 30;
+                const duration = (Number(valorPago) === 3 || (balanceUsed && Number(valorPago) + Number(balanceUsed) === 3)) ? 7 : 30;
     
                 let newExpirationDate;
                 const existingExpiration = await expirationDates.findOne({ userId });
@@ -1608,8 +1608,8 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
         }
 
         // --- INÍCIO DA LÓGICA DE VALIDAÇÃO DE VALOR ---
-        const planoSemanal = 100;
-        const planoMensal = 300;
+        const planoSemanal = 3;
+        const planoMensal = 1;
         let valorFinalAPagar = 0;
         let saldoUtilizado = 0;
         let duration = 0;
