@@ -873,8 +873,9 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
 
         console.log('[PagBank] [ETAPA 1/3] Preparando para enviar requisição para a API do PagBank...');
 
-        // Chama a API para criar a cobrança
-        const result = await pagbankClient.charges.create(paymentData);
+        // --- CORREÇÃO APLICADA AQUI ---
+        // Chama a API para criar a cobrança PIX
+        const result = await pagbankClient.pix.create(paymentData);
 
         console.log('[PagBank] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
 
