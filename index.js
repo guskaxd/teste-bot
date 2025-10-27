@@ -852,7 +852,6 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         const accessToken = process.env.PAGBANK_TOKEN;
         const url = 'https://sandbox.api.pagseguro.com/charges';
 
-        // Calcula a data de expiração para daqui a 10 minutos no formato ISO 8601
         const expirationDate = new Date();
         expirationDate.setMinutes(expirationDate.getMinutes() + 10);
 
@@ -860,10 +859,9 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
             reference_id: `user-${userId}-${Date.now()}`,
             description: `Taxa de acesso (${duration} dias)`,
             // =============================================================
-            // ESTRUTURA CORRIGIDA AQUI
-            // 1. O 'amount' principal é movido para dentro de 'qr_codes'.
-            // 2. Um novo objeto 'qr_codes' é criado com os detalhes do PIX.
-            // 3. O 'payment_method' é simplificado.
+            // CORREÇÃO FINAL APLICADA AQUI
+            // O objeto 'payment_method' foi completamente removido,
+            // pois já estamos especificando um 'qr_codes'.
             // =============================================================
             qr_codes: [{
                 amount: {
@@ -871,9 +869,6 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
                 },
                 expiration_date: expirationDate.toISOString(),
             }],
-            payment_method: {
-                type: 'PIX',
-            },
             notification_urls: [`${process.env.APP_URL}/webhook-pagbank`],
             metadata: {
                 userId: userId,
@@ -893,7 +888,6 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         const result = response.data;
         console.log('[PagBank API] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
 
-        // A lógica para processar a resposta permanece a mesma
         const pixData = result.qr_codes[0];
         if (!pixData || !pixData.text) {
             throw new Error('Resposta da API do PagBank não contém os dados do PIX esperados.');
