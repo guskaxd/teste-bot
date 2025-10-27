@@ -844,7 +844,7 @@ app.get('/', (req, res) => {
     res.status(200).send('API e da Comunidade Money Services estão online e funcionando!');
 });
 
-// createPagBankPayment - VERSÃO FINAL COM ESTRUTURA CORRETA DA API
+// createPagBankPayment - VERSÃO FINAL ALINHADA COM A DOCUMENTAÇÃO OFICIAL
 async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0) {
     console.log(`[PagBank API] Iniciando pagamento para userId: ${userId}, valor: ${valor}`);
     try {
@@ -858,16 +858,18 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         const paymentData = {
             reference_id: `user-${userId}-${Date.now()}`,
             description: `Taxa de acesso (${duration} dias)`,
+            // =============================================================
+            // CORREÇÃO FINAL CONFORME DOCUMENTAÇÃO
+            // 1. O objeto 'amount' no nível principal foi REMOVIDO.
+            // 2. O valor é definido APENAS dentro de 'qr_codes'.
+            // 3. O 'payment_method' simples é mantido, pois é obrigatório.
+            // =============================================================
             qr_codes: [{
                 amount: {
                     value: valorEmCentavos,
                 },
                 expiration_date: expirationDate.toISOString(),
             }],
-            // =============================================================
-            // CORREÇÃO FINAL APLICADA AQUI
-            // REINSERIMOS O BLOCO 'payment_method' DE FORMA SIMPLES
-            // =============================================================
             payment_method: {
                 type: 'PIX',
             },
