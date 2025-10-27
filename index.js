@@ -844,32 +844,43 @@ app.get('/', (req, res) => {
     res.status(200).send('API e da Comunidade Money Services estão online e funcionando!');
 });
 
-// createPagBankPayment - VERSÃO FINAL E CORRETA
-// createPagBankPayment - VERSÃO FINAL E CORRETA
-async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0) {
+// createPagBankPayment - VERSÃO FINAL COM DADOS DO CLIENTE
+async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0, customerName, customerPhone) {
     console.log(`[PagBank API] Iniciando pagamento para userId: ${userId}, valor: ${valor}`);
     try {
         const valorEmCentavos = Math.round(Number(valor) * 100);
         const accessToken = process.env.PAGBANK_TOKEN;
-        const url = 'https://api.pagseguro.com/charges'; // URL de Produção
+        const url = 'https://api.pagseguro.com/charges';
+
+        // Extrai o DDD e o número do WhatsApp
+        const areaCode = customerPhone.substring(0, 2);
+        const phoneNumber = customerPhone.substring(2);
 
         const paymentData = {
             reference_id: `user-${userId}-${Date.now()}`,
             description: `Taxa de acesso (${duration} dias)`,
-            // =============================================================
-            // ESTRUTURA FINAL E CORRETA
-            // 1. O objeto 'amount' (valor) está no nível principal.
-            // 2. O objeto 'qr_codes' foi REMOVIDO (a API que vai gerá-lo).
-            // 3. O 'payment_method' é detalhado com o tempo de expiração do PIX.
-            // =============================================================
             amount: {
                 value: valorEmCentavos,
                 currency: 'BRL'
             },
+            // =============================================================
+            // CORREÇÃO FINAL APLICADA
+            // Adicionado o objeto 'customer' obrigatório para produção.
+            // =============================================================
+            customer: {
+                name: customerName,
+                // O PagBank exige um e-mail, podemos usar um genérico se não o coletamos.
+                email: `${userId}@discord-user.com`, 
+                phones: [{
+                    country: "55",
+                    area: areaCode,
+                    number: phoneNumber,
+                    type: "MOBILE"
+                }]
+            },
             payment_method: {
                 type: 'PIX',
                 pix: {
-                    // Tempo em segundos que o QR Code será válido
                     expires_in: 600, // 10 minutos
                 }
             },
@@ -892,7 +903,6 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         const result = response.data;
         console.log('[PagBank API] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
 
-        // O resto da lógica para processar a RESPOSTA da API não muda.
         const pixData = result.qr_codes[0];
         if (!pixData || !pixData.text) {
             throw new Error('Resposta da API do PagBank não contém os dados do PIX esperados.');
@@ -1450,6 +1460,7 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
         const guild = interaction.guild;
         const member = await guild.members.fetch(userId).catch(() => null);
         let isIndicationId = false;
+        const userDoc = await registeredUsers.findOne({ userId });
 
         // A função de log permanece a mesma
         const logCouponUsage = async (couponCode, title, description) => {
@@ -1648,7 +1659,7 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
         try {
             // A chamada agora usa as variáveis validadas
             console.log('[Debug] 8. Canal de pagamento definido. Chamando a API do PagBank...');
-            const paymentInfo = await createPagBankPayment(userId, valorFinalAPagar, duration, saldoUtilizado);
+            const paymentInfo = await createPagBankPayment(userId, valorFinalAPagar, duration, saldoUtilizado, userDoc.name, userDoc.whatsapp);
             console.log('[Debug] 9. Resposta da API do PagBank recebida com sucesso.');
             
             const qrCodeBuffer = Buffer.from(paymentInfo.qrCodeBase64, 'base64');
