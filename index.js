@@ -844,34 +844,34 @@ app.get('/', (req, res) => {
     res.status(200).send('API e da Comunidade Money Services estão online e funcionando!');
 });
 
-// createPagBankPayment - VERSÃO FINAL ALINHADA COM A DOCUMENTAÇÃO OFICIAL
+// createPagBankPayment - VERSÃO FINAL E CORRETA
 async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0) {
     console.log(`[PagBank API] Iniciando pagamento para userId: ${userId}, valor: ${valor}`);
     try {
         const valorEmCentavos = Math.round(Number(valor) * 100);
         const accessToken = process.env.PAGBANK_TOKEN;
+        // A URL de produção já está correta no seu código
         const url = 'https://api.pagseguro.com/charges';
-
-        const expirationDate = new Date();
-        expirationDate.setMinutes(expirationDate.getMinutes() + 10);
 
         const paymentData = {
             reference_id: `user-${userId}-${Date.now()}`,
             description: `Taxa de acesso (${duration} dias)`,
             // =============================================================
-            // CORREÇÃO FINAL CONFORME DOCUMENTAÇÃO
-            // 1. O objeto 'amount' no nível principal foi REMOVIDO.
-            // 2. O valor é definido APENAS dentro de 'qr_codes'.
-            // 3. O 'payment_method' simples é mantido, pois é obrigatório.
+            // ESTRUTURA FINAL E CORRETA
+            // 1. O objeto 'amount' volta para o nível principal.
+            // 2. O objeto 'qr_codes' é REMOVIDO (a API que vai gerá-lo).
+            // 3. O 'payment_method' é detalhado com o tempo de expiração.
             // =============================================================
-            qr_codes: [{
-                amount: {
-                    value: valorEmCentavos,
-                },
-                expiration_date: expirationDate.toISOString(),
-            }],
+            amount: {
+                value: valorEmCentavos,
+                currency: 'BRL'
+            },
             payment_method: {
                 type: 'PIX',
+                pix: {
+                    // Tempo em segundos que o QR Code será válido
+                    expires_in: 600, // 10 minutos
+                }
             },
             notification_urls: [`${process.env.APP_URL}/webhook-pagbank`],
             metadata: {
@@ -892,6 +892,7 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         const result = response.data;
         console.log('[PagBank API] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
 
+        // O resto da lógica para processar a RESPOSTA da API não muda.
         const pixData = result.qr_codes[0];
         if (!pixData || !pixData.text) {
             throw new Error('Resposta da API do PagBank não contém os dados do PIX esperados.');
@@ -917,7 +918,6 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         throw new Error('Falha ao se comunicar com a API de pagamentos do PagBank.');
     }
 }
-
 // =================================================================================
 // NOVO WEBHOOK - PAGBANK
 // =================================================================================
