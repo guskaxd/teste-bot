@@ -858,17 +858,19 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         const paymentData = {
             reference_id: `user-${userId}-${Date.now()}`,
             description: `Taxa de acesso (${duration} dias)`,
-            // =============================================================
-            // CORREÇÃO FINAL APLICADA AQUI
-            // O objeto 'payment_method' foi completamente removido,
-            // pois já estamos especificando um 'qr_codes'.
-            // =============================================================
             qr_codes: [{
                 amount: {
                     value: valorEmCentavos,
                 },
                 expiration_date: expirationDate.toISOString(),
             }],
+            // =============================================================
+            // CORREÇÃO FINAL APLICADA AQUI
+            // REINSERIMOS O BLOCO 'payment_method' DE FORMA SIMPLES
+            // =============================================================
+            payment_method: {
+                type: 'PIX',
+            },
             notification_urls: [`${process.env.APP_URL}/webhook-pagbank`],
             metadata: {
                 userId: userId,
