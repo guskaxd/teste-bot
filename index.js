@@ -850,7 +850,7 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
     try {
         const valorEmCentavos = Math.round(Number(valor) * 100);
         const accessToken = process.env.PAGBANK_TOKEN;
-        const url = 'https://sandbox.api.pagseguro.com/charges';
+        const url = 'https://api.pagseguro.com/charges';
 
         const expirationDate = new Date();
         expirationDate.setMinutes(expirationDate.getMinutes() + 10);
@@ -936,7 +936,7 @@ app.post('/webhook-pagbank', async (req, res) => {
 
             // Busca os detalhes completos da cobrança na API do PagBank
             const accessToken = process.env.PAGBANK_TOKEN;
-            const url = `https://sandbox.api.pagseguro.com/charges/${chargeId}`; // URL de Teste
+            const url = `https://api.pagseguro.com/charges/${chargeId}`;
             const headers = { 'Authorization': `Bearer ${accessToken}` };
             const response = await axios.get(url, { headers });
             const chargeDetails = response.data;
