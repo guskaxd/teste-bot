@@ -20,7 +20,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 const express = require('express');
 require('dotenv').config();
 const PagSeguro = require('pagseguro-nodejs');
-// Definindo o client antes de usá-lo
+const axios = require('axios');
 const QRCode = require('qrcode');
 const client = new Client({
     intents: [
@@ -628,7 +628,7 @@ async function checkExpirationNow(userId, expirationDate) {
     // Notificação de expiração
     if (daysLeft <= 0) {
         const CUSTO_PLANO_TRIMESTRAL = 1200;
-        const CUSTO_PLANO_MENSAL = 500;
+        const CUSTO_PLANO_MENSAL = 1;
         const CUSTO_PLANO_SEMANAL = 200;
     
         const balanceDoc = await userBalances.findOne({ userId });
@@ -844,10 +844,13 @@ app.get('/', (req, res) => {
     res.status(200).send('API e da Comunidade Money Services estão online e funcionando!');
 });
 
+// NOVA FUNÇÃO createPagBankPayment com AXIOS
 async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0) {
-    console.log(`[PagBank] Iniciando pagamento para userId: ${userId}, valor: ${valor}, saldo usado: ${saldoUtilizado}`);
+    console.log(`[PagBank API] Iniciando pagamento para userId: ${userId}, valor: ${valor}`);
     try {
         const valorEmCentavos = Math.round(Number(valor) * 100);
+        const accessToken = process.env.PAGBANK_TOKEN;
+        const url = 'https://sandbox.api.pagseguro.com/charges'; // URL de Teste (Sandbox)
 
         const paymentData = {
             reference_id: `user-${userId}-${Date.now()}`,
@@ -867,14 +870,16 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
             },
         };
 
-        console.log('[PagBank] [ETAPA 1/3] Preparando para enviar requisição para a API do PagBank...');
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+            'x-api-version': '4.0' // Versão da API
+        };
 
-        // =============================================================
-        // ESTA É A LINHA QUE FOI CORRIGIDA. AGORA USA .pix.create
-        // =============================================================
-        const result = await pagbankClient.pix.create(paymentData);
-
-        console.log('[PagBank] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
+        console.log('[PagBank API] [ETAPA 1/3] Enviando requisição para a API do PagBank...');
+        const response = await axios.post(url, paymentData, { headers });
+        const result = response.data;
+        console.log('[PagBank API] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
 
         const pixData = result.qr_codes[0];
         if (!pixData || !pixData.text) {
@@ -888,15 +893,17 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
             copiaECola: pixData.text,
         };
 
-        console.log('[PagBank] [ETAPA 3/3] Pagamento processado e dados retornados.');
+        console.log('[PagBank API] [ETAPA 3/3] Pagamento processado e dados retornados.');
         return paymentInfo;
 
     } catch (error) {
-        console.error('[PagBank] ERRO CRÍTICO ao se comunicar com a API do PagBank.');
-        if (error.errors) {
-            console.error('Detalhes do erro da API:', JSON.stringify(error.errors, null, 2));
+        console.error('[PagBank API] ERRO CRÍTICO ao se comunicar com a API do PagBank.');
+        if (error.response) {
+            // O erro veio da API do PagBank (ex: token inválido, dados errados)
+            console.error('Detalhes do erro da API:', JSON.stringify(error.response.data, null, 2));
         } else {
-            console.error('Detalhes completos do erro:', error);
+            // O erro foi na comunicação (ex: sem internet)
+            console.error('Detalhes completos do erro de comunicação:', error.message);
         }
         throw new Error('Falha ao se comunicar com a API de pagamentos do PagBank.');
     }
@@ -919,7 +926,11 @@ app.post('/webhook-pagbank', async (req, res) => {
             console.log(`[Webhook PagBank] Processando charge.paid para o ID: ${chargeId}`);
 
             // Busca os detalhes completos da cobrança na API do PagBank
-            const chargeDetails = await pagbankClient.charges.get(chargeId);
+            const accessToken = process.env.PAGBANK_TOKEN;
+            const url = `https://sandbox.api.pagseguro.com/charges/${chargeId}`; // URL de Teste
+            const headers = { 'Authorization': `Bearer ${accessToken}` };
+            const response = await axios.get(url, { headers });
+            const chargeDetails = response.data;
 
             // Pega os metadados que enviamos ao criar a cobrança
             const metadata = chargeDetails.metadata;
@@ -975,7 +986,7 @@ app.post('/webhook-pagbank', async (req, res) => {
                     const referrerId = payingUserDoc.referredBy;
 
                     const VALOR_TRIMESTRAL = 1200;
-                    const VALOR_MENSAL = 500;
+                    const VALOR_MENSAL = 1;
                     const VALOR_SEMANAL = 200;
                     const BONUS_TRIMESTRAL = 600;
                     const BONUS_MENSAL = 250;
