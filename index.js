@@ -845,22 +845,22 @@ app.get('/', (req, res) => {
 });
 
 // createPagBankPayment - VERSÃO FINAL E CORRETA
+// createPagBankPayment - VERSÃO FINAL E CORRETA
 async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0) {
     console.log(`[PagBank API] Iniciando pagamento para userId: ${userId}, valor: ${valor}`);
     try {
         const valorEmCentavos = Math.round(Number(valor) * 100);
         const accessToken = process.env.PAGBANK_TOKEN;
-        // A URL de produção já está correta no seu código
-        const url = 'https://api.pagseguro.com/charges';
+        const url = 'https://api.pagseguro.com/charges'; // URL de Produção
 
         const paymentData = {
             reference_id: `user-${userId}-${Date.now()}`,
             description: `Taxa de acesso (${duration} dias)`,
             // =============================================================
             // ESTRUTURA FINAL E CORRETA
-            // 1. O objeto 'amount' volta para o nível principal.
-            // 2. O objeto 'qr_codes' é REMOVIDO (a API que vai gerá-lo).
-            // 3. O 'payment_method' é detalhado com o tempo de expiração.
+            // 1. O objeto 'amount' (valor) está no nível principal.
+            // 2. O objeto 'qr_codes' foi REMOVIDO (a API que vai gerá-lo).
+            // 3. O 'payment_method' é detalhado com o tempo de expiração do PIX.
             // =============================================================
             amount: {
                 value: valorEmCentavos,
