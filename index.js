@@ -847,11 +847,9 @@ app.get('/', (req, res) => {
 async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0) {
     console.log(`[PagBank] Iniciando pagamento para userId: ${userId}, valor: ${valor}, saldo usado: ${saldoUtilizado}`);
     try {
-        // A API do PagBank espera o valor em centavos. Ex: R$ 200,00 -> 20000
         const valorEmCentavos = Math.round(Number(valor) * 100);
 
         const paymentData = {
-            // reference_id é o nosso identificador único para a transação
             reference_id: `user-${userId}-${Date.now()}`,
             description: `Taxa de acesso (${duration} dias)`,
             amount: {
@@ -861,9 +859,7 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
             payment_method: {
                 type: 'PIX',
             },
-            // URL que o PagBank vai chamar para nos avisar quando o pagamento for aprovado
             notification_urls: [`${process.env.APP_URL}/webhook-pagbank`],
-            // Usamos 'metadata' para enviar informações que queremos receber de volta no webhook
             metadata: {
                 userId: userId,
                 balance_used: saldoUtilizado,
@@ -873,27 +869,23 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
 
         console.log('[PagBank] [ETAPA 1/3] Preparando para enviar requisição para a API do PagBank...');
 
-        // --- CORREÇÃO APLICADA AQUI ---
-        // Chama a API para criar a cobrança PIX
+        // =============================================================
+        // ESTA É A LINHA QUE FOI CORRIGIDA. AGORA USA .pix.create
+        // =============================================================
         const result = await pagbankClient.pix.create(paymentData);
 
         console.log('[PagBank] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
 
-        // A API retorna um array de qr_codes, pegamos o primeiro (e único)
         const pixData = result.qr_codes[0];
-
         if (!pixData || !pixData.text) {
             throw new Error('Resposta da API do PagBank não contém os dados do PIX esperados.');
         }
 
-        // Geramos a imagem do QR Code em base64 a partir do texto "copia e cola"
         const qrCodeBase64 = await QRCode.toDataURL(pixData.text);
-
         const paymentInfo = {
-            paymentId: result.id, // ID da cobrança do PagBank
-            // Removemos o prefixo que a biblioteca 'qrcode' adiciona para termos só a base64 pura
+            paymentId: result.id,
             qrCodeBase64: qrCodeBase64.replace('data:image/png;base64,', ''),
-            copiaECola: pixData.text, // O código "Copia e Cola"
+            copiaECola: pixData.text,
         };
 
         console.log('[PagBank] [ETAPA 3/3] Pagamento processado e dados retornados.');
@@ -901,13 +893,11 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
 
     } catch (error) {
         console.error('[PagBank] ERRO CRÍTICO ao se comunicar com a API do PagBank.');
-        // O SDK do PagSeguro formata os erros da API de uma forma específica
         if (error.errors) {
             console.error('Detalhes do erro da API:', JSON.stringify(error.errors, null, 2));
         } else {
             console.error('Detalhes completos do erro:', error);
         }
-
         throw new Error('Falha ao se comunicar com a API de pagamentos do PagBank.');
     }
 }
