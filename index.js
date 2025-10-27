@@ -844,7 +844,7 @@ app.get('/', (req, res) => {
     res.status(200).send('API e da Comunidade Money Services estão online e funcionando!');
 });
 
-// NOVA FUNÇÃO createPagBankPayment com AXIOS
+// NOVA FUNÇÃO createPagBankPayment com AXIOS (VERSÃO FINAL CORRIGIDA)
 async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0) {
     console.log(`[PagBank API] Iniciando pagamento para userId: ${userId}, valor: ${valor}`);
     try {
@@ -859,8 +859,15 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
                 value: valorEmCentavos,
                 currency: 'BRL',
             },
+            // =============================================================
+            // CORREÇÃO APLICADA AQUI
+            // Adicionado o objeto 'pix' com o tempo de expiração
+            // =============================================================
             payment_method: {
                 type: 'PIX',
+                pix: {
+                    expires_in: 600, // 600 segundos = 10 minutos
+                },
             },
             notification_urls: [`${process.env.APP_URL}/webhook-pagbank`],
             metadata: {
@@ -873,7 +880,7 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
         const headers = {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${accessToken}`,
-            'x-api-version': '4.0' // Versão da API
+            'x-api-version': '4.0'
         };
 
         console.log('[PagBank API] [ETAPA 1/3] Enviando requisição para a API do PagBank...');
@@ -899,10 +906,8 @@ async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0)
     } catch (error) {
         console.error('[PagBank API] ERRO CRÍTICO ao se comunicar com a API do PagBank.');
         if (error.response) {
-            // O erro veio da API do PagBank (ex: token inválido, dados errados)
             console.error('Detalhes do erro da API:', JSON.stringify(error.response.data, null, 2));
         } else {
-            // O erro foi na comunicação (ex: sem internet)
             console.error('Detalhes completos do erro de comunicação:', error.message);
         }
         throw new Error('Falha ao se comunicar com a API de pagamentos do PagBank.');
