@@ -16,12 +16,13 @@ const {
     MessageFlags,
     AttachmentBuilder,
 } = require('discord.js');
+
 const { MongoClient, ObjectId } = require('mongodb');
 const express = require('express');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); // Adicione esta linha
+const qrcode = require('qrcode'); 
 require('dotenv').config();
-const PagSeguro = require('pagseguro-nodejs');
-const axios = require('axios');
-const QRCode = require('qrcode');
+// Definindo o client antes de usá-lo
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -34,15 +35,6 @@ const client = new Client({
 // --- Cliente do Express (da antiga API) ---
 const app = express();
 app.use(express.json());
-
-// --- Cliente do Mercado Pago (da antiga API) ---
-// ATENÇÃO: Renomeado para 'mpClient' para não conflitar com o 'client' do Discord
-const pagbankClient = new PagSeguro({
-    email: process.env.PAGBANK_EMAIL,
-    token: process.env.PAGBANK_TOKEN,
-    // O SDK espera 'sandbox' ou 'production', então garantimos o formato correto
-    env: process.env.PAGBANK_ENVIRONMENT === 'sandbox' ? 'sandbox' : 'production',
-});
 
 // IDs do servidor
 const GUILD_ID = '1417557260095328438'; 
@@ -844,303 +836,236 @@ app.get('/', (req, res) => {
     res.status(200).send('API e da Comunidade Money Services estão online e funcionando!');
 });
 
-// createPagBankPayment - VERSÃO FINAL COM DADOS DO CLIENTE
-async function createPagBankPayment(userId, valor, duration, saldoUtilizado = 0, customerName, customerPhone) {
-    console.log(`[PagBank API] Iniciando pagamento para userId: ${userId}, valor: ${valor}`);
+// ADICIONE ESTA NOVA FUNÇÃO
+async function createStripePayment(userId, valor, duration, saldoUtilizado = 0) {
+    console.log(`[Stripe] Iniciando pagamento para userId: ${userId}, valor: ${valor}, saldo usado: ${saldoUtilizado}`);
     try {
-        const valorEmCentavos = Math.round(Number(valor) * 100);
-        const accessToken = process.env.PAGBANK_TOKEN;
-        const url = 'https://api.pagseguro.com/charges';
+        // IMPORTANTE: A API do Stripe usa o menor valor da moeda (centavos para BRL).
+        // Devemos multiplicar o valor por 100 e arredondar para um inteiro.
+        const amountInCents = Math.round(valor * 100);
 
-        // Extrai o DDD e o número do WhatsApp
-        const areaCode = customerPhone.substring(0, 2);
-        const phoneNumber = customerPhone.substring(2);
-
-        const paymentData = {
-            reference_id: `user-${userId}-${Date.now()}`,
-            description: `Taxa de acesso (${duration} dias)`,
-            amount: {
-                value: valorEmCentavos,
-                currency: 'BRL'
-            },
-            // =============================================================
-            // CORREÇÃO FINAL APLICADA
-            // Adicionado o objeto 'customer' obrigatório para produção.
-            // =============================================================
-            customer: {
-                name: customerName,
-                // O PagBank exige um e-mail, podemos usar um genérico se não o coletamos.
-                email: `${userId}@discord-user.com`, 
-                phones: [{
-                    country: "55",
-                    area: areaCode,
-                    number: phoneNumber,
-                    type: "MOBILE"
-                }]
-            },
-            payment_method: {
-                type: 'PIX',
+        console.log('[Stripe] [ETAPA 1/3] Criando PaymentIntent...');
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: amountInCents,
+            currency: 'brl',
+            payment_method_types: ['pix'],
+            // O PIX expira em 10 minutos (600 segundos)
+            payment_method_options: {
                 pix: {
-                    expires_in: 600, // 10 minutos
-                }
+                    expires_at: Math.floor(Date.now() / 1000) + 600, // 10 minutos a partir de agora
+                },
             },
-            notification_urls: [`${process.env.APP_URL}/webhook-pagbank`],
+            // Metadata é crucial para sabermos de quem é o pagamento no webhook
             metadata: {
                 userId: userId,
                 balance_used: saldoUtilizado,
-                plan_duration: duration,
-            },
-        };
+                plan_duration: duration
+            }
+        });
+        console.log('[Stripe] [ETAPA 2/3] PaymentIntent criado com sucesso.');
 
-        const headers = {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-            'x-api-version': '4.0'
-        };
+        // O Stripe retorna a string de dados para o QR Code.
+        // Usamos a biblioteca 'qrcode' para gerar a imagem em base64.
+        const qrCodeDataString = paymentIntent.next_action.pix_display_qr_code.data;
+        const qrCodeDataURL = await qrcode.toDataURL(qrCodeDataString);
+        const qrCodeBase64 = qrCodeDataURL.split(',')[1]; // Extrai apenas a parte base64
 
-        console.log('[PagBank API] [ETAPA 1/3] Enviando requisição para a API do PagBank...');
-        const response = await axios.post(url, paymentData, { headers });
-        const result = response.data;
-        console.log('[PagBank API] [ETAPA 2/3] Resposta recebida da API do PagBank com sucesso.');
+        // O "copia e cola" do Stripe vem em outro campo
+        const copiaECola = paymentIntent.next_action.pix_display_qr_code.copyable_image_url;
 
-        const pixData = result.qr_codes[0];
-        if (!pixData || !pixData.text) {
-            throw new Error('Resposta da API do PagBank não contém os dados do PIX esperados.');
-        }
-
-        const qrCodeBase64 = await QRCode.toDataURL(pixData.text);
         const paymentInfo = {
-            paymentId: result.id,
-            qrCodeBase64: qrCodeBase64.replace('data:image/png;base64,', ''),
-            copiaECola: pixData.text,
+            paymentId: paymentIntent.id,
+            qrCodeBase64: qrCodeBase64,
+            copiaECola: copiaECola
         };
 
-        console.log('[PagBank API] [ETAPA 3/3] Pagamento processado e dados retornados.');
+        console.log('[Stripe] [ETAPA 3/3] Dados do PIX processados e retornados.');
         return paymentInfo;
 
     } catch (error) {
-        console.error('[PagBank API] ERRO CRÍTICO ao se comunicar com a API do PagBank.');
-        if (error.response) {
-            console.error('Detalhes do erro da API:', JSON.stringify(error.response.data, null, 2));
-        } else {
-            console.error('Detalhes completos do erro de comunicação:', error.message);
-        }
-        throw new Error('Falha ao se comunicar com a API de pagamentos do PagBank.');
+        console.error('[Stripe] ERRO CRÍTICO ao se comunicar com a API do Stripe.');
+        console.error('Detalhes completos do erro:', error);
+        throw new Error('Falha ao se comunicar com a API de pagamentos.');
     }
 }
-// =================================================================================
-// NOVO WEBHOOK - PAGBANK
-// =================================================================================
-app.post('/webhook-pagbank', async (req, res) => {
-    const notification = req.body;
-    console.log('[API] Webhook do PagBank recebido:', JSON.stringify(notification, null, 2));
 
-    // Responde imediatamente ao PagBank para confirmar o recebimento
-    res.sendStatus(200);
+// Rota para receber webhooks do Stripe
+app.post('/webhook-stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-    // A notificação de PIX pago vem com o tipo 'charge.paid'
-    if (notification && notification.type === 'charge.paid' && notification.charges && notification.charges.length > 0) {
+    let event;
+
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    } catch (err) {
+        console.error('[Stripe Webhook] Erro na verificação da assinatura:', err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Responde imediatamente ao Stripe para confirmar o recebimento
+    res.status(200).send();
+
+    // Processa apenas o evento que nos interessa
+    if (event.type === 'payment_intent.succeeded') {
+        const paymentIntent = event.data.object;
+        console.log('[Stripe Webhook] Recebido evento payment_intent.succeeded:', paymentIntent.id);
+
         try {
-            const chargeId = notification.charges[0].id; // Pega o ID da cobrança
-            console.log(`[Webhook PagBank] Processando charge.paid para o ID: ${chargeId}`);
-
-            // Busca os detalhes completos da cobrança na API do PagBank
-            const accessToken = process.env.PAGBANK_TOKEN;
-            const url = `https://api.pagseguro.com/charges/${chargeId}`;
-            const headers = { 'Authorization': `Bearer ${accessToken}` };
-            const response = await axios.get(url, { headers });
-            const chargeDetails = response.data;
-
-            // Pega os metadados que enviamos ao criar a cobrança
-            const metadata = chargeDetails.metadata;
-            if (!metadata || !metadata.userId || !metadata.plan_duration) {
-                console.error('[Webhook PagBank] ERRO: Metadados essenciais (userId, plan_duration) não encontrados na cobrança.', chargeDetails);
-                return;
-            }
-
-            const userId = metadata.userId;
-            const valorPago = chargeDetails.amount.value / 100; // Converte de centavos para reais
-            const planCode = Number(metadata.plan_duration);
-            const balanceUsed = metadata.balance_used ? Number(metadata.balance_used) : 0;
-            const paymentReference = `PB-${chargeId}`;
+            // Extrai os metadados que enviamos ao criar o pagamento
+            const { userId, balance_used, plan_duration } = paymentIntent.metadata;
+            const valorPago = paymentIntent.amount / 100; // Converte de centavos para reais
             const now = new Date();
+            const paymentReference = `Stripe-${paymentIntent.id}`;
+            const balanceUsed = parseFloat(balance_used);
+            const planCode = parseInt(plan_duration);
 
-            // Verificação de Idempotência: Checa se já processamos este pagamento
-            const alreadyProcessed = await registeredUsers.findOne({ 'paymentHistory.reference': paymentReference });
+            // O resto da sua lógica é QUASE IDÊNTICO. Apenas adaptamos os nomes das variáveis.
+            const alreadyProcessed = await registeredUsers.findOne({ userId: userId, 'paymentHistory.reference': paymentReference });
             if (alreadyProcessed) {
-                console.log(`[Webhook PagBank] Pagamento ${paymentReference} já processado anteriormente. Ignorando.`);
+                console.log(`[Webhook] Pagamento ${paymentReference} já processado. Ignorando.`);
                 return;
             }
 
-            const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
-            if (!guild) return;
+                const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
+                if (!guild) return;
+    
+                const member = await guild.members.fetch(userId).catch(() => null);
+                if (!member) return;
 
-            const member = await guild.members.fetch(userId).catch(() => null);
-            if (!member) {
-                console.warn(`[Webhook PagBank] Membro ${userId} não encontrado no servidor.`);
-                return;
-            }
+                let confirmationEmbedDescription = '';
+                let confirmationEmbedFields = [];
+                let durationForLog = 'N/A'; // Variável para o log final
 
-            // Lógica de Ativação/Renovação (similar à do Mercado Pago)
-            let newExpirationDate;
-            const existingExpiration = await expirationDates.findOne({ userId });
+                if (planCode > 0) {
+                    durationForLog = `${planCode} dias`;
+                    let newExpirationDate;
+                    const existingExpiration = await expirationDates.findOne({ userId });
+                    if (existingExpiration && new Date(existingExpiration.expirationDate) > now) {
+                        newExpirationDate = new Date(existingExpiration.expirationDate);
+                    } else {
+                        newExpirationDate = new Date(now);
+                    }
+                    newExpirationDate.setDate(newExpirationDate.getDate() + planCode);
+    
+                    await expirationDates.updateOne({ userId }, { $set: { expirationDate: newExpirationDate } }, { upsert: true });
+                    await member.roles.add(VIP_ROLE_ID);
+                    await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID);
+                    console.log(`[Webhook] Assinatura VIP de ${planCode} dias ativada para ${userId}.`);
+    
+                    confirmationEmbedDescription = 'Sua assinatura VIP foi ativada/renovada com sucesso!';
+                    confirmationEmbedFields.push({ name: '💸 Valor Pago', value: `R$ ${valorPago.toFixed(2)}`, inline: true });
+                    confirmationEmbedFields.push({ name: '⏳ Duração Adicionada', value: `${planCode} dias`, inline: true });
+                    confirmationEmbedFields.push({ name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR') });
+                }
 
-            if (existingExpiration && new Date(existingExpiration.expirationDate) > now) {
-                newExpirationDate = new Date(existingExpiration.expirationDate);
-            } else {
-                newExpirationDate = new Date(now);
-            }
-            newExpirationDate.setDate(newExpirationDate.getDate() + planCode);
+                // Lógica de Bônus (sem alterações)
+                const VALOR_TRIMESTRAL = 1200;
+                const VALOR_MENSAL = 1;
+                const VALOR_SEMANAL = 200;
+                const BONUS_TRIMESTRAL = 600;
+                const BONUS_MENSAL = 250;
+                const BONUS_SEMANAL = 100;
 
-            await expirationDates.updateOne({ userId }, { $set: { expirationDate: newExpirationDate } }, { upsert: true });
-            await member.roles.add(VIP_ROLE_ID);
-            await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID);
-
-            // Lógica de Bônus por Indicação (semelhante)
-            const payingUserDoc = await registeredUsers.findOne({ userId });
-            if (payingUserDoc && payingUserDoc.referredBy && !payingUserDoc.referralBonusPaid) {
-                // Verifica se é o primeiro pagamento do usuário
-                const paymentCount = await paymentHistory.countDocuments({ userId });
-                if (paymentCount === 0) {
-                    const referrerId = payingUserDoc.referredBy;
-
-                    const VALOR_TRIMESTRAL = 1200;
-                    const VALOR_MENSAL = 1;
-                    const VALOR_SEMANAL = 200;
-                    const BONUS_TRIMESTRAL = 600;
-                    const BONUS_MENSAL = 250;
-                    const BONUS_SEMANAL = 100;
-
-                    let bonusAmount = 0;
-                    if (valorPago + balanceUsed === VALOR_TRIMESTRAL) bonusAmount = BONUS_TRIMESTRAL;
-                    else if (valorPago + balanceUsed === VALOR_MENSAL) bonusAmount = BONUS_MENSAL;
-                    else if (valorPago + balanceUsed === VALOR_SEMANAL) bonusAmount = BONUS_SEMANAL;
-
-                    if (bonusAmount > 0) {
+                let bonusAmount = 0;
+                if (Number(valorPago) === VALOR_TRIMESTRAL) bonusAmount = BONUS_TRIMESTRAL;
+                else if (Number(valorPago) === VALOR_MENSAL) bonusAmount = BONUS_MENSAL;
+                else if (Number(valorPago) === VALOR_SEMANAL) bonusAmount = BONUS_SEMANAL;
+                
+                if (bonusAmount > 0) {
+                    const payingUser = await registeredUsers.findOne({ userId: userId });
+                    if (payingUser && payingUser.referredBy && !payingUser.referralBonusPaid && (!payingUser.paymentHistory || payingUser.paymentHistory.length === 0)) {
+                        const referrerId = payingUser.referredBy;
                         await userBalances.updateOne({ userId: referrerId }, { $inc: { balance: bonusAmount } }, { upsert: true });
-                        await registeredUsers.updateOne({ userId }, { $set: { referralBonusPaid: true } });
-                        console.log(`[Webhook PagBank] Bônus de R$ ${bonusAmount} creditado para o indicador ${referrerId}.`);
+                        await registeredUsers.updateOne({ userId: userId }, { $set: { referralBonusPaid: true } });
                     }
                 }
-            }
+                
+                await registeredUsers.updateOne({ userId }, { $push: { paymentHistory: { amount: valorPago, timestamp: now, reference: paymentReference } } });
 
-            // Salva o histórico de pagamento
-            await paymentHistory.insertOne({
-                userId: userId,
-                amount: valorPago,
-                balanceUsed: balanceUsed,
-                plan: `${planCode} dias`,
-                reference: paymentReference,
-                gateway: 'PagBank',
-                timestamp: now,
-            });
-             // Atualiza o registro principal do usuário (opcional, mas bom para consistência)
-            await registeredUsers.updateOne({ userId }, { $push: { paymentHistory: { amount: valorPago, timestamp: now, reference: paymentReference } } });
-
-
-            // Notificação para o usuário
-            const confirmationEmbed = new EmbedBuilder()
-                .setTitle('✅ Pagamento Confirmado!')
-                .setColor('#00FF00').setTimestamp().setFooter({ text: 'Agradecemos a sua preferência!' });
-
-            if (balanceUsed > 0) {
-                confirmationEmbed.setDescription(`Pagamento processado com sucesso utilizando seu saldo de bônus!`)
-                    .addFields(
-                        { name: '💰 Saldo Utilizado', value: `R$ ${balanceUsed.toFixed(2)}`, inline: true },
-                        { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true }
+                const confirmationEmbed = new EmbedBuilder()
+                    .setTitle('✅ Pagamento Confirmado!')
+                    .setColor('#00FF00').setTimestamp().setFooter({ text: 'Agradecemos a sua preferência!' });
+                
+                if (balanceUsed && balanceUsed > 0) {
+                    confirmationEmbed.setDescription(`Pagamento processado com sucesso utilizando seu saldo de bônus!`);
+                    confirmationEmbed.addFields(
+                        { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
+                        { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true },
+                        ...confirmationEmbedFields
                     );
-            } else {
-                confirmationEmbed.setDescription('Sua assinatura VIP foi ativada/renovada com sucesso!');
-            }
+                } else {
+                    confirmationEmbed.setDescription(confirmationEmbedDescription);
+                    confirmationEmbed.addFields(confirmationEmbedFields);
+                }
 
-            confirmationEmbed.addFields(
-                { name: '⏳ Duração Adicionada', value: `${planCode} dias`, inline: false },
-                { name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR') }
-            );
-
-            const channelRecord = await activePixChannels.findOne({ userId: userId });
-            if (channelRecord && channelRecord.channelId) {
-                const paymentChannel = await guild.channels.fetch(channelRecord.channelId).catch(() => null);
-                if (paymentChannel) {
-                    await paymentChannel.send({ content: `<@${userId}>`, embeds: [confirmationEmbed] });
+                const channelRecord = await activePixChannels.findOne({ userId: userId });
+                if (channelRecord && channelRecord.channelId) {
+                    const paymentChannel = await guild.channels.fetch(channelRecord.channelId).catch(() => null);
+                    if (paymentChannel) await paymentChannel.send({ content: `<@${userId}>`, embeds: [confirmationEmbed] });
+                    else await member.send({ embeds: [confirmationEmbed] }).catch(() => {});
+                    await activePixChannels.deleteOne({ userId: userId });
                 } else {
                     await member.send({ embeds: [confirmationEmbed] }).catch(() => {});
                 }
-                await activePixChannels.deleteOne({ userId: userId });
-            } else {
-                await member.send({ embeds: [confirmationEmbed] }).catch(() => {});
-            }
 
-            // Log para a administração
-            try {
-                // --- ADICIONE ESTA LINHA PARA CORRIGIR O ERRO ---
-                const horarioFormatado = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour12: false }).replace(', ', ' às ');
-            
-                // 1. Log para o canal geral de pagamentos (sempre envia)
-                const logPagamentosChannel = await guild.channels.fetch(LOG_PAGAMENTOS_ID);
-                if (logPagamentosChannel) {
-                    const embedLog = new EmbedBuilder()
-                        .setTitle('💰 Pagamento Aprovado (PagBank)')
-                        .setColor('#00FF00')
+                // Lógica de Logs e Dedução de Saldo
+                const horarioFormatado = now.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+                const logBotChannel = await guild.channels.fetch(LOG_PAGAMENTOS_ID);
+                const embedPagamentoAprovado = new EmbedBuilder()
+                    .setTitle('💰 Pagamento Aprovado').setDescription('Um novo pagamento foi aprovado!').setColor('#00FF00')
+                    .addFields(
+                        { name: '👤 Usuário', value: `\`${member.user.username} (ID: ${userId})\`` },
+                        { name: '💸 Valor', value: `\`R$${valorPago.toFixed(2)}\``, inline: true },
+                        { name: '📝 Referência', value: `\`${paymentIntent.id}\``, inline: true },                        { name: '⏳ Duração', value: `\`${durationForLog}\``, inline: true },
+                        { name: '🕒 Horário', value: `\`${horarioFormatado}\`` }
+                    ).setTimestamp();
+                await logBotChannel.send({ embeds: [embedPagamentoAprovado] });
+                if (balanceUsed && balanceUsed > 0) {
+                try {
+                    await userBalances.updateOne({ userId: userId }, { $inc: { balance: -balanceUsed } });
+                    console.log(`[Webhook] Saldo deduzido: R$ ${Number(balanceUsed).toFixed(2)} para ${userId}.`);
+                    
+                    const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
+                    const renewalWithBalanceEmbed = new EmbedBuilder()
+                        .setTitle('💳 Assinatura Renovada com Saldo')
+                        .setDescription(`A assinatura de <@${userId}> foi renovada utilizando o saldo de bônus.`)
+                        .setColor('#FFC300')
                         .addFields(
                             { name: '👤 Usuário', value: `<@${userId}> (ID: ${userId})` },
-                            { name: '💸 Valor', value: `R$${valorPago.toFixed(2)}`, inline: true },
-                            { name: '📝 Referência', value: `\`${chargeId}\``, inline: true },
-                            { name: '⏳ Duração', value: `${planCode} dias`, inline: true }
-                        ).setTimestamp();
-                    await logPagamentosChannel.send({ embeds: [embedLog] });
+                            { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
+                            { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true }
+                        )
+                        .setTimestamp();
+                    await logChannel.send({ embeds: [renewalWithBalanceEmbed] });
+                } catch (err) {
+                    console.error(`[Webhook] ERRO ao deduzir saldo ou logar para ${userId}:`, err);
                 }
-            
-                // 2. Log para o canal de logs do bot (lógica condicional)
-                if (balanceUsed && balanceUsed > 0) {
-                    // Lógica para quando o SALDO É USADO
-                    try {
-                        await userBalances.updateOne({ userId: userId }, { $inc: { balance: -balanceUsed } });
-                        console.log(`[Webhook] Saldo deduzido: R$ ${Number(balanceUsed).toFixed(2)} para ${userId}.`);
-                        
-                        const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
-                        const renewalWithBalanceEmbed = new EmbedBuilder()
-                            .setTitle('💳 Assinatura Renovada com Saldo')
-                            .setDescription(`A assinatura de <@${userId}> foi renovada utilizando o saldo de bônus.`)
-                            .setColor('#FFC300')
-                            .addFields(
-                                { name: '👤 Usuário', value: `<@${userId}> (ID: ${userId})` },
-                                { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
-                                { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true }
-                            )
-                            .setTimestamp();
-                        await logChannel.send({ embeds: [renewalWithBalanceEmbed] });
-                    } catch (err) {
-                        console.error(`[Webhook] ERRO ao deduzir saldo ou logar para ${userId}:`, err);
-                    }
-                } else {
-                    // Lógica para quando o SALDO NÃO É USADO
-                    try {
-                        const logBotsChannel = await guild.channels.fetch(LOGS_BOTS_ID); // Usando uma variável diferente para evitar conflito
-                        const embedAssinaturaRenovada = new EmbedBuilder()
-                            .setTitle('🔄 Assinatura Renovada')
-                            .setDescription('A assinatura de um usuário foi renovada!')
-                            .setColor('#00BFFF')
-                            .addFields(
-                                { name: '👤 Usuário', value: `\`${member.user.username}\`` },
-                                { name: '🆔 ID', value: `\`${userId}\``, inline: true },
-                                { name: '🕒 Horário', value: `\`${horarioFormatado}\``, inline: true }, // AGORA FUNCIONA
-                                { name: '✅ Papéis Atualizados', value: '`Sim`', inline: true }
-                            )
-                            .setTimestamp();
-                        await logBotsChannel.send({ embeds: [embedAssinaturaRenovada] });
-                    } catch (err) {
-                        console.error("Erro ao enviar log de renovação genérico para LOGS_BOTS_ID:", err);
-                    }
+            } else {
+                // Log para renovação SEM saldo
+                try {
+                    const logPagamentosChannel = await guild.channels.fetch(LOGS_BOTS_ID);
+                    const embedAssinaturaRenovada = new EmbedBuilder()
+                        .setTitle('🔄 Assinatura Renovada')
+                        .setDescription('A assinatura de um usuário foi renovada!')
+                        .setColor('#00BFFF')
+                        .addFields(
+                            { name: '👤 Usuário', value: `\`${member.user.username}\`` },
+                            { name: '🆔 ID', value: `\`${userId}\``, inline: true },
+                            { name: '🕒 Horário', value: `\`${horarioFormatado}\``, inline: true },
+                            { name: '✅ Papéis Atualizados', value: '`Sim`', inline: true }
+                        )
+                        .setTimestamp();
+                    await logPagamentosChannel.send({ embeds: [embedAssinaturaRenovada] });
+                } catch (err) {
+                    console.error("Erro ao enviar log de renovação genérico para LOGS_BOTS_ID:", err);
                 }
-            }catch (error) {
-                console.error('[API] Erro CRÍTICO ao processar logs do webhook do PagBank', error);
             }
-    }catch (error) {
-        console.error('[API] Erro CRÍTICO.', error);
-    }
-}
-});
+        } catch (error) {
+            console.error('[Stripe Webhook] Erro CRÍTICO ao processar evento:', error);
+        }
+}}
+);
 
 // Quando o bot estiver online
 client.once('clientReady', async () => {
@@ -1460,7 +1385,6 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
         const guild = interaction.guild;
         const member = await guild.members.fetch(userId).catch(() => null);
         let isIndicationId = false;
-        const userDoc = await registeredUsers.findOne({ userId });
 
         // A função de log permanece a mesma
         const logCouponUsage = async (couponCode, title, description) => {
@@ -1559,7 +1483,7 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
         }
 
         const planoTrimestral = 1200;
-        const planoMensal = 500;
+        const planoMensal = 1;
         const planoSemanal = 200;
         
         let valorFinalAPagar = 0;
@@ -1658,9 +1582,9 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
 
         try {
             // A chamada agora usa as variáveis validadas
-            console.log('[Debug] 8. Canal de pagamento definido. Chamando a API do PagBank...');
-            const paymentInfo = await createPagBankPayment(userId, valorFinalAPagar, duration, saldoUtilizado, userDoc.name, userDoc.whatsapp);
-            console.log('[Debug] 9. Resposta da API do PagBank recebida com sucesso.');
+            console.log('[Debug] 8. Canal de pagamento definido. Chamando a API do Mercado Pago...');
+            const paymentInfo = await createStripePayment(userId, valorFinalAPagar, duration, saldoUtilizado);
+            console.log('[Debug] 9. Resposta da API do Mercado Pago recebida com sucesso.');
             
             const qrCodeBuffer = Buffer.from(paymentInfo.qrCodeBase64, 'base64');
             const attachment = new AttachmentBuilder(qrCodeBuffer, { name: 'qrcode.png' });
