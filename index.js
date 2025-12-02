@@ -1,5 +1,3 @@
-//MERCADOPAGO_ACCESS_TOKEN=APP_USR-7855046346221457-091818-dab4718d88b0eb7d65c9e998a6ed4a63-1099777240
-//url: 
 const {
     Client,
     GatewayIntentBits,
@@ -19,8 +17,7 @@ const {
 
 const { MongoClient, ObjectId } = require('mongodb');
 const express = require('express');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); // Adicione esta linha
-const qrcode = require('qrcode'); 
+const { MercadoPagoConfig, Payment } = require('mercadopago');
 require('dotenv').config();
 // Definindo o client antes de usá-lo
 const client = new Client({
@@ -36,21 +33,27 @@ const client = new Client({
 const app = express();
 app.use(express.json());
 
+// --- Cliente do Mercado Pago (da antiga API) ---
+// ATENÇÃO: Renomeado para 'mpClient' para não conflitar com o 'client' do Discord
+const mpClient = new MercadoPagoConfig({
+    accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN,
+});
+
 // IDs do servidor
-const GUILD_ID = '1417557260095328438'; 
-const CANAL_PAINEL_ID = '1417583842256224337';
-const CATEGORIA_PAGAMENTOS_ID = '1417568378637254857';
-const REGISTRADO_ROLE_ID = '1417567838192799945';
-const VIP_ROLE_ID = '1417567360545460325';
-const AGUARDANDO_PAGAMENTO_ROLE_ID = '1417567895868932199';
-const CANAL_REGISTRO_ID = '1417583803194675323';
-const LOG_PAGAMENTOS_ID = '1417557261189910580';
-const LOGS_BOTS_ID = '1417566269263183952';
-const NOTIFICACOES_ID = '1417566342823018566';
-const CANAL_WHATSAPP_ID = '1417566470333796402';
-const EXCLUIDOS_ID = '1417566387399819304';
-const LOG_COUPONS_ID = '1417566495776575559';
-const CATEGORIA_EXPIRATIONS_ID = '1417568449965592777';
+const GUILD_ID = '1403745828635414659'; 
+const CANAL_PAINEL_ID = '1403762758931185747';
+const CATEGORIA_PAGAMENTOS_ID = '1403834750568894626';
+const REGISTRADO_ROLE_ID = '1403759346797514824';
+const VIP_ROLE_ID = '1403759523663052821';
+const AGUARDANDO_PAGAMENTO_ROLE_ID = '1403760210660687942';
+const CANAL_REGISTRO_ID = '1403762565443489804';
+const LOG_PAGAMENTOS_ID = '1403800340696137728';
+const LOGS_BOTS_ID = '1403800395926474782';
+const NOTIFICACOES_ID = '1403800130578284615';
+const CANAL_WHATSAPP_ID = '1403800265953644544';
+const EXCLUIDOS_ID = '1403800479250513992';
+const LOG_COUPONS_ID = '1403800214242066493';
+const CATEGORIA_EXPIRATIONS_ID = '1403837229247500380';
 
 // Conexão com MongoDB
 const mongoUri = process.env.MONGO_URI;
@@ -96,7 +99,7 @@ async function connectDB() {
     try {
         await mongoClient.connect();
         console.log('Conectado ao MongoDB');
-        db = mongoClient.db('moneybet');
+        db = mongoClient.db('ghostdelay');
         return db;
     } catch (err) {
         console.error('Erro ao conectar ao MongoDB:', err);
@@ -145,13 +148,17 @@ async function setupChangeStream() {
             const docId = documentKey._id.toString();
             let userId;
 
+            // Tentar obter userId diretamente do change stream
             if (change.fullDocument && change.fullDocument.userId) {
                 userId = change.fullDocument.userId.toString();
+                console.log(`userId extraído do fullDocument para _id ${docId}: ${userId}`);
                 userIdCache.set(docId, userId);
             } else if (documentKey.userId) {
                 userId = documentKey.userId.toString();
+                console.log(`userId extraído do documentKey para _id ${docId}: ${userId}`);
                 userIdCache.set(docId, userId);
             } else {
+                // Para operações de delete, buscar userId na coleção registeredUsers
                 try {
                     const registeredDoc = await registeredUsers.findOne(
                         { 'paymentHistory.expirationId': documentKey._id },
@@ -159,7 +166,11 @@ async function setupChangeStream() {
                     );
                     if (registeredDoc && registeredDoc.userId) {
                         userId = registeredDoc.userId.toString();
+                        console.log(`userId recuperado de registeredUsers para _id ${docId}: ${userId}`);
                         userIdCache.set(docId, userId);
+                    } else {
+                        console.warn(`Nenhum userId encontrado para _id ${docId} em registeredUsers. Ação abortada.`);
+                        return;
                     }
                 } catch (err) {
                     console.error(`Erro ao buscar userId para _id ${docId} em expirationDates:`, err);
@@ -172,54 +183,163 @@ async function setupChangeStream() {
                 return;
             }
 
-            const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
+            const guild = await client.guilds.fetch(GUILD_ID).catch(err => {
+                console.error('Erro ao buscar guild:', err);
+                return null;
+            });
             if (!guild) return;
 
-            const member = await guild.members.fetch(userId).catch(() => null);
+            const member = await guild.members.fetch(userId).catch(err => {
+                console.error(`Erro ao buscar membro ${userId}:`, err);
+                return null;
+            });
             if (!member) return;
-            
+
+            const logsBotsChannel = await guild.channels.fetch(LOGS_BOTS_ID).catch(err => {
+                console.error('Erro ao buscar canal de logs:', err);
+                return null;
+            });
+            const notificacoesChannel = await guild.channels.fetch(NOTIFICACOES_ID).catch(err => {
+                console.error('Erro ao buscar canal de notificações:', err);
+                return null;
+            });
+            const excluidosChannel = await guild.channels.fetch(EXCLUIDOS_ID).catch(err => {
+                console.error('Erro ao buscar canal de excluídos:', err);
+                return null;
+            });
+
             const horario = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', hour12: false }).replace(', ', ' às ');
 
             if (change.operationType === 'delete') {
-                // (A lógica de 'delete' permanece a mesma)
                 console.log(`Assinatura cancelada para userId ${userId}`);
                 try {
-                    await member.roles.remove(VIP_ROLE_ID);
-                    await member.roles.add(AGUARDANDO_PAGAMENTO_ROLE_ID);
+                    const botMember = await guild.members.fetch(client.user.id);
+                    const botHighestRole = botMember.roles.highest;
+                    const vipRole = await guild.roles.fetch(VIP_ROLE_ID);
+                    const aguardandoRole = await guild.roles.fetch(AGUARDANDO_PAGAMENTO_ROLE_ID);
+
+                    if (botHighestRole.position <= vipRole.position) {
+                        console.error(`Bot não tem permissão para remover VIP (hierarquia insuficiente) para ${userId}`);
+                    } else {
+                        await member.roles.remove(VIP_ROLE_ID).catch(err => console.error(`Erro ao remover VIP para ${userId}:`, err));
+                        console.log(`VIP removido para ${userId}`);
+                    }
+
+                    if (botHighestRole.position <= aguardandoRole.position) {
+                        console.error(`Bot não tem permissão para adicionar AGUARDANDO_PAGAMENTO (hierarquia insuficiente) para ${userId}`);
+                    } else {
+                        await member.roles.add(AGUARDANDO_PAGAMENTO_ROLE_ID).catch(err => console.error(`Erro ao adicionar AGUARDANDO_PAGAMENTO para ${userId}:`, err));
+                        console.log(`AGUARDANDO_PAGAMENTO adicionado para ${userId}`);
+                    }
+
                     await notificationSent.deleteMany({ userId });
 
-                    const excluidosChannel = await guild.channels.fetch(EXCLUIDOS_ID);
-                    const embedExcluidos = new EmbedBuilder()
-                        .setTitle('🚫 Assinatura Cancelada')
-                        .setDescription(`A assinatura de <@${userId}> foi cancelada via painel.`)
-                        .addFields(
-                            { name: '👤 Usuário', value: `${member.user.tag}`, inline: false },
-                            { name: '🆔 ID', value: userId, inline: true },
-                            { name: '🕒 Horário', value: horario, inline: true },
-                        )
-                        .setColor('#FF0000').setTimestamp();
-                    await excluidosChannel.send({ embeds: [embedExcluidos] });
+                    if (excluidosChannel) {
+                        const embedExcluidos = new EmbedBuilder()
+                            .setTitle('🚫 Assinatura Cancelada')
+                            .setDescription(`A assinatura de <@${userId}> foi cancelada via painel.`)
+                            .addFields([
+                                { name: '👤 Usuário', value: `${member.user.tag}`, inline: false },
+                                { name: '🆔 ID', value: userId, inline: true },
+                                { name: '🕒 Horário', value: horario, inline: true },
+                            ])
+                            .setColor('#FF0000')
+                            .setTimestamp();
+                        await excluidosChannel.send({ embeds: [embedExcluidos] });
+                        console.log(`Notificação enviada no canal EXCLUIDOS_ID para ${userId}`);
+                    }
+
+                    if (notificacoesChannel) {
+                        const embedNotificacao = new EmbedBuilder()
+                            .setTitle('🚫 Assinatura Cancelada')
+                            .setDescription(`A assinatura de <@${userId}> foi cancelada.`)
+                            .addFields([
+                                { name: '👤 Usuário', value: `${member.user.tag}`, inline: false },
+                                { name: '🆔 ID', value: userId, inline: true },
+                                { name: '🕒 Horário', value: horario, inline: true },
+                            ])
+                            .setColor('#FF0000')
+                            .setTimestamp();
+                        await notificacoesChannel.send({ embeds: [embedNotificacao], content: `<@${userId}>` }).catch(err => {
+                            console.error(`Falha ao enviar notificação de cancelamento para ${userId} no canal ${NOTIFICACOES_ID}:`, err);
+                        });
+                    }
                 } catch (err) {
                     console.error(`Erro ao processar cancelamento para ${userId}:`, err);
+                    if (logsBotsChannel) {
+                        const errorEmbed = new EmbedBuilder()
+                            .setTitle('⚠️ Erro ao Processar Cancelamento')
+                            .setDescription(`Falha ao atualizar papéis após cancelamento para <@${userId}>.`)
+                            .addFields([
+                                { name: 'Usuário', value: `${member.user.tag} (ID: ${userId})`, inline: false },
+                                { name: 'Erro', value: err.message, inline: false },
+                            ])
+                            .setColor('#FF0000')
+                            .setTimestamp();
+                        await logsBotsChannel.send({ embeds: [errorEmbed] });
+                    }
                 }
-
             } else if (change.operationType === 'insert' || change.operationType === 'update') {
                 const fullDocument = change.fullDocument;
-                if (!fullDocument || !fullDocument.expirationDate) return;
+                if (!fullDocument || !fullDocument.expirationDate) {
+                    console.warn('Documento sem expirationDate detectado:', change);
+                    return;
+                }
 
                 const expirationDate = new Date(fullDocument.expirationDate);
                 const now = new Date();
+                console.log(`[${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] Data de expiração alterada para ${userId}: ${expirationDate.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
 
-                if (expirationDate > now) {
-                    // SE A DATA FOR NO FUTURO, APENAS ATUALIZA OS CARGOS
-                    console.log(`[Change Stream] Assinatura de ${userId} está ativa. Garantindo cargos...`);
-                    await member.roles.add(VIP_ROLE_ID).catch(err => console.error(err));
-                    await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID).catch(err => console.error(err));
-                } else {
-                    // --- CORREÇÃO APLICADA AQUI ---
-                    // SE A DATA FOR NO PASSADO, CHAMA A LÓGICA COMPLETA DE EXPIRAÇÃO
-                    console.log(`[Change Stream] Alteração manual para data expirada detectada para ${userId}. Iniciando verificação completa...`);
-                    await checkExpirationNow(userId, expirationDate);
+                try {
+                    const botMember = await guild.members.fetch(client.user.id);
+                    const botHighestRole = botMember.roles.highest;
+                    const vipRole = await guild.roles.fetch(VIP_ROLE_ID);
+                    const aguardandoRole = await guild.roles.fetch(AGUARDANDO_PAGAMENTO_ROLE_ID);
+
+                    if (expirationDate > now) {
+                        if (botHighestRole.position <= vipRole.position) {
+                            console.error(`Bot não tem permissão para adicionar VIP (hierarquia insuficiente) para ${userId}`);
+                        } else {
+                            await member.roles.add(VIP_ROLE_ID).catch(err => console.error(`Erro ao adicionar VIP para ${userId}:`, err));
+                            console.log(`VIP adicionado para ${userId}`);
+                        }
+                        if (botHighestRole.position <= aguardandoRole.position) {
+                            console.error(`Bot não tem permissão para remover AGUARDANDO_PAGAMENTO (hierarquia insuficiente) para ${userId}`);
+                        } else {
+                            await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID).catch(err => console.error(`Erro ao remover AGUARDANDO_PAGAMENTO para ${userId}:`, err));
+                            console.log(`AGUARDANDO_PAGAMENTO removido para ${userId}`);
+                        }
+                    } else {
+                        if (botHighestRole.position <= vipRole.position) {
+                            console.error(`Bot não tem permissão para remover VIP (hierarquia insuficiente) para ${userId}`);
+                        } else {
+                            await member.roles.remove(VIP_ROLE_ID).catch(err => console.error(`Erro ao remover VIP para ${userId}:`, err));
+                            console.log(`VIP removido para ${userId}`);
+                        }
+                        if (botHighestRole.position <= aguardandoRole.position) {
+                            console.error(`Bot não tem permissão para adicionar AGUARDANDO_PAGAMENTO (hierarquia insuficiente) para ${userId}`);
+                        } else {
+                            await member.roles.add(AGUARDANDO_PAGAMENTO_ROLE_ID).catch(err => console.error(`Erro ao adicionar AGUARDANDO_PAGAMENTO para ${userId}:`, err));
+                            console.log(`AGUARDANDO_PAGAMENTO adicionado para ${userId}`);
+                        }
+                    }
+
+                    // Reinicia a verificação global para garantir que todas as expirações sejam monitoradas
+                    await startExpirationCheck();
+                } catch (err) {
+                    console.error(`Erro ao atualizar papéis para ${userId}:`, err);
+                    if (logsBotsChannel) {
+                        const errorEmbed = new EmbedBuilder()
+                            .setTitle('⚠️ Erro ao Atualizar Papéis')
+                            .setDescription(`Falha ao atualizar papéis após alteração de expiração para <@${userId}>.`)
+                            .addFields([
+                                { name: 'Usuário', value: `${member.user.tag} (ID: ${userId})`, inline: false },
+                                { name: 'Erro', value: err.message, inline: false },
+                            ])
+                            .setColor('#FF0000')
+                            .setTimestamp();
+                        await logsBotsChannel.send({ embeds: [errorEmbed] });
+                    }
                 }
             }
         });
@@ -424,25 +544,31 @@ async function checkAllExpirations() {
 
 // Função para iniciar a verificação de expirações
 async function startExpirationCheck() {
+    // Cancelar qualquer intervalo existente
     if (expirationCheckInterval.size > 0) {
-        clearInterval(expirationCheckInterval.get('global'));
+        const existingInterval = expirationCheckInterval.get('global');
+        clearInterval(existingInterval);
         expirationCheckInterval.delete('global');
         console.log('Intervalo de verificação anterior cancelado');
     }
 
+    // Iniciar um único intervalo global
     const interval = setInterval(async () => {
+        console.log(`Iniciando verificação global de expirações às ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
         await checkAllExpirations();
-    }, 10 * 60 * 1000); // <-- CORRIGIDO: Intervalo de 10 minutos
+    }, 10 * 60 * 1000); // Intervalo de 10 minutos
 
     expirationCheckInterval.set('global', interval);
-    console.log('Intervalo de verificação global iniciado (10 minutos)'); // <-- CORRIGIDO: Log atualizado
+    console.log('Intervalo de verificação global iniciado (10 minutos)');
 
-    console.log('A primeira verificação de expirações foi agendada para daqui a 1 minuto.');
+    // Agendar a primeira verificação para 1 minuto após a inicialização
+    console.log('A primeira verificação de expirações foi agendada para daqui a 1 minuto para não sobrecarregar a inicialização.');
     setTimeout(async () => {
-        console.log('[Agendado] Executando a primeira verificação de expirações...');
+        console.log(`[Agendado] Executando a primeira verificação de expirações...`);
         await checkAllExpirations();
-    }, 60 * 1000);
+    }, 60 * 1000); // Atraso de 1 minuto (60000 ms)
 }
+
 // Função auxiliar para verificar expiração imediatamente
 async function checkExpirationNow(userId, expirationDate) {
     const now = new Date();
@@ -616,44 +742,30 @@ async function checkExpirationNow(userId, expirationDate) {
             }
         }
     }
-
     // Notificação de expiração
     if (daysLeft <= 0) {
-        const CUSTO_PLANO_TRIMESTRAL = 1200;
-        const CUSTO_PLANO_MENSAL = 1;
-        const CUSTO_PLANO_SEMANAL = 200;
+        console.log(`[Debug] Assinatura de ${userId} expirada. Verificando saldo para renovação automática...`);
+        
+        // Define o custo do plano
+        const CUSTO_PLANO_MENSAL = 2; 
     
+        // Busca o saldo do usuário
         const balanceDoc = await userBalances.findOne({ userId });
-        const saldoDisponivel = balanceDoc ? Number(balanceDoc.balance) : 0;
+        const saldoDisponivel = balanceDoc ? balanceDoc.balance : 0;
     
-        let renewed = false;
-        let renewalDetails = {};
-    
-        // --- LÓGICA DE RENOVAÇÃO AUTOMÁTICA CORRIGIDA E PRIORIZADA ---
-        // 1. Tenta renovar o plano TRIMESTRAL primeiro
-        if (saldoDisponivel >= CUSTO_PLANO_TRIMESTRAL) {
-            renewed = true;
-            renewalDetails = { plan: 'Trimestral', cost: CUSTO_PLANO_TRIMESTRAL, duration: 90 };
-        // 2. Senão, tenta renovar o plano MENSAL
-        } else if (saldoDisponivel >= CUSTO_PLANO_MENSAL) {
-            renewed = true;
-            renewalDetails = { plan: 'Mensal', cost: CUSTO_PLANO_MENSAL, duration: 30 };
-        // 3. Senão, tenta renovar o plano SEMANAL
-        } else if (saldoDisponivel >= CUSTO_PLANO_SEMANAL) {
-            renewed = true;
-            renewalDetails = { plan: 'Semanal', cost: CUSTO_PLANO_SEMANAL, duration: 7 };
-        }
-    
-        if (renewed) {
-            console.log(`[Auto-Renovação] Saldo suficiente para o plano ${renewalDetails.plan}. Renovando para ${userId}...`);
+        // VERIFICA SE O SALDO É SUFICIENTE
+        if (saldoDisponivel >= CUSTO_PLANO_MENSAL) {
+            console.log(`[Auto-Renovação] Saldo suficiente (R$ ${saldoDisponivel}) para ${userId}. Renovando...`);
             try {
-                await userBalances.updateOne({ userId }, { $inc: { balance: -renewalDetails.cost } });
+                // 1. Deduzir o saldo do usuário
+                await userBalances.updateOne({ userId }, { $inc: { balance: -CUSTO_PLANO_MENSAL } });
     
+                // 2. Renovar a assinatura por mais 30 dias a partir de AGORA
                 const newExpirationDate = new Date();
-                newExpirationDate.setDate(newExpirationDate.getDate() + renewalDetails.duration);
+                newExpirationDate.setDate(newExpirationDate.getDate() + 30);
                 await expirationDates.updateOne({ userId }, { $set: { expirationDate: newExpirationDate } });
                 
-                // Lógica de log e notificação para o usuário (DM)
+                // 3. (Opcional, mas recomendado) Enviar um log para os administradores
                 const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
                 if (logChannel) {
                     const logEmbed = new EmbedBuilder()
@@ -661,61 +773,60 @@ async function checkExpirationNow(userId, expirationDate) {
                         .setDescription(`A assinatura de <@${userId}> foi renovada usando o saldo de bônus.`)
                         .setColor('#00BFFF')
                         .addFields(
-                            { name: 'Plano Renovado', value: renewalDetails.plan, inline: true },
-                            { name: '💰 Saldo Utilizado', value: `R$ ${renewalDetails.cost.toFixed(2)}`, inline: true },
+                            { name: '💰 Saldo Utilizado', value: `R$ ${CUSTO_PLANO_MENSAL.toFixed(2)}` },
                             { name: '🗓️ Nova Expiração', value: newExpirationDate.toLocaleDateString('pt-BR') }
                         )
                         .setTimestamp();
                     await logChannel.send({ embeds: [logEmbed] });
                 }
+                // 4. Notificar o usuário via DM
                 await member.send({
                     embeds: [
                         new EmbedBuilder()
                             .setTitle('✅ Assinatura Renovada!')
-                            .setDescription(`Sua assinatura VIP foi renovada automaticamente por mais **${renewalDetails.duration} dias** (Plano ${renewalDetails.plan}) utilizando seu saldo.`)
+                            .setDescription(`Olá! Sua assinatura VIP acabou de ser renovada automaticamente por mais 30 dias utilizando seu saldo de bônus.`)
                             .setColor('#00FF00')
                             .setTimestamp()
                     ]
                 }).catch(err => console.error(`Falha ao enviar DM de auto-renovação para ${userId}:`, err));
-                await notificationSent.deleteMany({ userId });
-    
+                // Limpa as notificações de expiração para o próximo ciclo
+                 await notificationSent.deleteMany({ userId });
             } catch (err) {
                 console.error(`[Auto-Renovação] Erro crítico ao renovar para ${userId}:`, err);
+                // Se falhar, talvez seja melhor proceder com a expiração normal
             }
         } else {
-        // --- LÓGICA DE EXPIRAÇÃO SEGURA ---
-        console.log(`[Expiração] Saldo insuficiente para ${userId}. Removendo cargos.`);
+        console.log(`[Expiração] Saldo insuficiente para ${userId}. Procedendo com a remoção do VIP.`);
         try {
+            // ETAPA 1: TENTAR ATUALIZAR OS CARGOS
             const botMember = await guild.members.fetch(client.user.id);
             const botHighestRole = botMember.roles.highest;
             const vipRole = await guild.roles.fetch(VIP_ROLE_ID);
             const aguardandoRole = await guild.roles.fetch(AGUARDANDO_PAGAMENTO_ROLE_ID);
 
-            // REMOVE O CARGO VIP
-            if (botHighestRole.position > vipRole.position) {
+            if (botHighestRole.position <= vipRole.position) {
+                // Lança um erro para ser pego pelo catch, impedindo a continuação
+                throw new Error(`Bot não tem permissão para remover VIP (hierarquia insuficiente) para ${userId}`);
+            } else {
                 await member.roles.remove(VIP_ROLE_ID);
                 console.log(`VIP removido para ${userId}`);
-            } else {
-                throw new Error(`Bot não tem permissão para remover VIP (hierarquia insuficiente) para ${userId}`);
             }
 
-            // ADICIONA O CARGO DE AGUARDANDO PAGAMENTO
-            if (botHighestRole.position > aguardandoRole.position) {
+            if (botHighestRole.position <= aguardandoRole.position) {
+                // Lança um erro para ser pego pelo catch
+                throw new Error(`Bot não tem permissão para adicionar AGUARDANDO_PAGAMENTO (hierarquia insuficiente) para ${userId}`);
+            } else {
                 await member.roles.add(AGUARDANDO_PAGAMENTO_ROLE_ID);
                 console.log(`AGUARDANDO_PAGAMENTO adicionado para ${userId}`);
-            } else {
-                throw new Error(`Bot não tem permissão para adicionar AGUARDANDO_PAGAMENTO (hierarquia insuficiente) para ${userId}`);
             }
 
-            // LIMPEZA DO BANCO DE DADOS
+            // CORREÇÃO CRÍTICA: As linhas de exclusão foram movidas para DENTRO do try.
+            // Elas só serão executadas se a atualização de cargos acima for bem-sucedida.
             await expirationDates.deleteOne({ userId });
             await notificationSent.deleteMany({ userId });
-            console.log(`Registros de expiração limpos para ${userId}.`);
+            console.log(`Registros de expiração e notificação para ${userId} foram limpos com sucesso.`);
 
-            // ETAPA 3: NOTIFICAR O USUÁRIO E OS CANAIS PÚBLICOS
-            const channelName = `expiracao-${member.user.username.toLowerCase()}-expirada`;
-            let expirationChannel = guild.channels.cache.find(ch => ch.name === channelName);
-
+            // ETAPA 2: NOTIFICAR O USUÁRIO (só acontece se a Etapa 1 funcionar)
             if (!expirationChannel) {
                 expirationChannel = await guild.channels.create({
                     name: channelName,
@@ -733,11 +844,11 @@ async function checkExpirationNow(userId, expirationDate) {
             const expireEmbed = new EmbedBuilder()
                 .setTitle('⏳ Assinatura Vencida')
                 .setDescription(`Sua assinatura VIP expirou. Renove agora acessando o canal de pagamentos.`)
-                .addFields(
+                .addFields([
                     { name: '👤 Usuário', value: `${member.user.tag}`, inline: true },
                     { name: '🆔 ID', value: userId, inline: true },
                     { name: '🕒 Horário', value: horario, inline: true },
-                )
+                ])
                 .setColor('#FF0000')
                 .setTimestamp();
 
@@ -752,29 +863,32 @@ async function checkExpirationNow(userId, expirationDate) {
                 } catch (err) {
                     console.error(`Erro ao deletar canal de expiração ${channelName} para ${userId}:`, err);
                 }
-            }, 12 * 60 * 60 * 1000);
+            }, 12 * 60 * 60 * 1000); // 12 horas
 
+            // Notificação pública
             const notificationsChannel = await guild.channels.fetch(NOTIFICACOES_ID).catch(() => null);
             if (notificationsChannel) {
+                console.log(`Tentando enviar notificação de vencimento para ${userId} no canal ${NOTIFICACOES_ID}`);
                 const publicExpireEmbed = new EmbedBuilder()
                     .setTitle('⏳ Assinatura Vencida')
                     .setDescription(`A assinatura de <@${userId}> expirou.`)
-                    .addFields(
+                    .addFields([
                         { name: '👤 Usuário', value: `${member.user.tag}`, inline: false },
                         { name: '🆔 ID', value: userId, inline: true },
                         { name: '🕒 Horário', value: horario, inline: true },
-                    )
+                    ])
                     .setColor('#FF0000')
                     .setTimestamp();
-                await notificationsChannel.send({ embeds: [publicExpireEmbed], content: `<@${userId}>` });
+                await notificationsChannel.send({ embeds: [publicExpireEmbed], content: `<@${userId}>` }).catch(err => {
+                console.log(`[FALHA CRÍTICA] Erro ao processar expiração para ${userId}. O registro de expiração NÃO foi removido para que o bot tente novamente no próximo ciclo.`, err);
+                });
             }
         } catch (err) {
-            console.error(`[FALHA CRÍTICA] Erro ao processar expiração para ${userId}. O registro de expiração NÃO foi removido para que o bot tente novamente no próximo ciclo.`, err);
+            console.error(`Erro ao processar notificação de expiração para ${userId}:`, err);
+        }
         }
     }
 }
-}
-
 async function auditVipRoles() {
     console.log('[Auditoria] Iniciando auditoria de cargos VIP...');
     try {
@@ -833,194 +947,262 @@ async function auditVipRoles() {
 // =================================================================================
 
 app.get('/', (req, res) => {
-    res.status(200).send('API e da Comunidade Money Services estão online e funcionando!');
+    res.status(200).send('API e da Comunidade Ghost Services estão online e funcionando!');
 });
 
-// ADICIONE ESTA NOVA FUNÇÃO
-async function createStripePayment(userId, valor, duration, saldoUtilizado = 0) {
-    console.log(`[Stripe] Iniciando pagamento para userId: ${userId}, valor: ${valor}, saldo usado: ${saldoUtilizado}`);
+async function createMercadoPagoPayment(userId, valor, duration, saldoUtilizado = 0) { // <--- A CORREÇÃO ESTÁ AQUI
+    console.log(`[PaymentFunc] Iniciando pagamento para userId: ${userId}, valor: ${valor}, saldo usado: ${saldoUtilizado}`);
     try {
-        // IMPORTANTE: A API do Stripe usa o menor valor da moeda (centavos para BRL).
-        // Devemos multiplicar o valor por 100 e arredondar para um inteiro.
-        const amountInCents = Math.round(valor * 100);
-
-        console.log('[Stripe] [ETAPA 1/3] Criando PaymentIntent...');
-        const paymentIntent = await stripe.paymentIntents.create({
-            amount: amountInCents,
-            currency: 'brl',
-            payment_method_types: ['pix'],
-            // O PIX expira em 10 minutos (600 segundos)
-            payment_method_options: {
-                pix: {
-                    expires_at: Math.floor(Date.now() / 1000) + 600, // 10 minutos a partir de agora
-                },
-            },
-            // Metadata é crucial para sabermos de quem é o pagamento no webhook
+        const paymentData = {
+            transaction_amount: Number(valor),
+            description: `Taxa de acesso (${duration} dias)`,
+            payment_method_id: 'pix',
+            payer: { email: `user-${userId}@ghost.services`},
+            external_reference: userId,
+            notification_url: `${process.env.APP_URL}/webhook-mercadopago`,
             metadata: {
-                userId: userId,
-                balance_used: saldoUtilizado,
-                plan_duration: duration
+                balance_used: saldoUtilizado
             }
-        });
-        console.log('[Stripe] [ETAPA 2/3] PaymentIntent criado com sucesso.');
-
-        // O Stripe retorna a string de dados para o QR Code.
-        // Usamos a biblioteca 'qrcode' para gerar a imagem em base64.
-        const qrCodeDataString = paymentIntent.next_action.pix_display_qr_code.data;
-        const qrCodeDataURL = await qrcode.toDataURL(qrCodeDataString);
-        const qrCodeBase64 = qrCodeDataURL.split(',')[1]; // Extrai apenas a parte base64
-
-        // O "copia e cola" do Stripe vem em outro campo
-        const copiaECola = paymentIntent.next_action.pix_display_qr_code.copyable_image_url;
-
-        const paymentInfo = {
-            paymentId: paymentIntent.id,
-            qrCodeBase64: qrCodeBase64,
-            copiaECola: copiaECola
         };
 
-        console.log('[Stripe] [ETAPA 3/3] Dados do PIX processados e retornados.');
+        const payment = new Payment(mpClient);
+
+        console.log('[PaymentFunc] [ETAPA 1/3] Preparando para enviar requisição para a API do Mercado Pago...');
+        
+        const result = await payment.create({ body: paymentData });
+        
+        console.log('[PaymentFunc] [ETAPA 2/3] Resposta recebida da API do Mercado Pago com sucesso.');
+        
+        const paymentInfo = {
+            paymentId: result.id,
+            qrCodeBase64: result.point_of_interaction.transaction_data.qr_code_base64,
+            copiaECola: result.point_of_interaction.transaction_data.qr_code
+        };
+
+        console.log('[PaymentFunc] [ETAPA 3/3] Pagamento processado e dados retornados.');
         return paymentInfo;
 
     } catch (error) {
-        console.error('[Stripe] ERRO CRÍTICO ao se comunicar com a API do Stripe.');
+        console.error('[PaymentFunc] ERRO CRÍTICO ao se comunicar com a API do Mercado Pago.');
         console.error('Detalhes completos do erro:', error);
+        
         throw new Error('Falha ao se comunicar com a API de pagamentos.');
     }
 }
 
-// Rota para receber webhooks do Stripe
-app.post('/webhook-stripe', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-    let event;
-
+// Rota da API agora chama a função diretamente
+app.post('/create-payment', async (req, res) => {
+    console.log('[API] Rota /create-payment foi chamada com o corpo:', req.body);
     try {
-        event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-    } catch (err) {
-        console.error('[Stripe Webhook] Erro na verificação da assinatura:', err.message);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
+        const { userId, valor, duration } = req.body;
+        if (!userId || !valor || !duration) {
+            return res.status(400).json({ error: 'Dados insuficientes.' });
+        }
+
+        // Chama a nova função
+        const paymentInfo = await createMercadoPagoPayment(userId, valor, duration);
+        
+        res.json(paymentInfo);
+
+    } catch (error) {
+        console.error('[API] Erro na rota /create-payment:', error.message);
+        res.status(500).json({ error: 'Falha ao criar pagamento.' });
+    }
+});
+
+// Substitua toda a sua rota de webhook por esta
+app.post('/webhook-mercadopago', async (req, res) => {
+    const { query } = req;
+    console.log('[API] Webhook recebido:', query);
+
+    // Responde imediatamente ao Mercado Pago para evitar timeouts e reenvios
+    res.sendStatus(200);
+
+    if (!query || !query['data.id']) {
+        console.log('[Webhook] Query inválida ou sem data.id. Ignorando.');
+        return;
     }
 
-    // Responde imediatamente ao Stripe para confirmar o recebimento
-    res.status(200).send();
-
-    // Processa apenas o evento que nos interessa
-    if (event.type === 'payment_intent.succeeded') {
-        const paymentIntent = event.data.object;
-        console.log('[Stripe Webhook] Recebido evento payment_intent.succeeded:', paymentIntent.id);
-
+    if (query.type === 'payment') {
         try {
-            // Extrai os metadados que enviamos ao criar o pagamento
-            const { userId, balance_used, plan_duration } = paymentIntent.metadata;
-            const valorPago = paymentIntent.amount / 100; // Converte de centavos para reais
-            const now = new Date();
-            const paymentReference = `Stripe-${paymentIntent.id}`;
-            const balanceUsed = parseFloat(balance_used);
-            const planCode = parseInt(plan_duration);
+            const payment = new Payment(mpClient);
+            const paymentDetails = await payment.get({ id: query['data.id'] });
+            
+            if (paymentDetails.status === 'approved') {
+                const userId = paymentDetails.external_reference;
+                const valorPago = paymentDetails.transaction_amount;
+                const now = new Date();
+                const paymentReference = `MP-${paymentDetails.id}`; // ID único do pagamento
+                const balanceUsed = paymentDetails.metadata?.balance_used;
+                const horarioFormatado = now.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
-            // O resto da sua lógica é QUASE IDÊNTICO. Apenas adaptamos os nomes das variáveis.
-            const alreadyProcessed = await registeredUsers.findOne({ userId: userId, 'paymentHistory.reference': paymentReference });
-            if (alreadyProcessed) {
-                console.log(`[Webhook] Pagamento ${paymentReference} já processado. Ignorando.`);
-                return;
-            }
+                const alreadyProcessed = await registeredUsers.findOne({ userId: userId, 'paymentHistory.reference': paymentReference });
+                if (alreadyProcessed) {
+                    console.log(`[Webhook] Pagamento ${paymentReference} já processado. Ignorando.`);
+                    return;
+                }
 
                 const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
-                if (!guild) return;
+                if (!guild) {
+                    console.error('[Webhook] Não foi possível encontrar o servidor (GUILD). Abortando.');
+                    return;
+                }
     
                 const member = await guild.members.fetch(userId).catch(() => null);
-                if (!member) return;
-
-                let confirmationEmbedDescription = '';
-                let confirmationEmbedFields = [];
-                let durationForLog = 'N/A'; // Variável para o log final
-
-                if (planCode > 0) {
-                    durationForLog = `${planCode} dias`;
-                    let newExpirationDate;
-                    const existingExpiration = await expirationDates.findOne({ userId });
-                    if (existingExpiration && new Date(existingExpiration.expirationDate) > now) {
-                        newExpirationDate = new Date(existingExpiration.expirationDate);
-                    } else {
-                        newExpirationDate = new Date(now);
-                    }
-                    newExpirationDate.setDate(newExpirationDate.getDate() + planCode);
-    
-                    await expirationDates.updateOne({ userId }, { $set: { expirationDate: newExpirationDate } }, { upsert: true });
-                    await member.roles.add(VIP_ROLE_ID);
-                    await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID);
-                    console.log(`[Webhook] Assinatura VIP de ${planCode} dias ativada para ${userId}.`);
-    
-                    confirmationEmbedDescription = 'Sua assinatura VIP foi ativada/renovada com sucesso!';
-                    confirmationEmbedFields.push({ name: '💸 Valor Pago', value: `R$ ${valorPago.toFixed(2)}`, inline: true });
-                    confirmationEmbedFields.push({ name: '⏳ Duração Adicionada', value: `${planCode} dias`, inline: true });
-                    confirmationEmbedFields.push({ name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR') });
+                if (!member) {
+                    console.error(`[Webhook] Não foi possível encontrar o membro com ID ${userId} no servidor. Abortando.`);
+                    return;
                 }
 
-                // Lógica de Bônus (sem alterações)
-                const VALOR_TRIMESTRAL = 1200;
-                const VALOR_MENSAL = 1;
-                const VALOR_SEMANAL = 200;
-                const BONUS_TRIMESTRAL = 600;
-                const BONUS_MENSAL = 250;
-                const BONUS_SEMANAL = 100;
+                // 1. Verificamos se o pagamento é o mensal (R$ 300)
+                if (Number(valorPago) === 2) {
+                    console.log(`[Bônus] Pagamento de R$ 300 detectado para ${userId}. Verificando indicação...`);
 
-                let bonusAmount = 0;
-                if (Number(valorPago) === VALOR_TRIMESTRAL) bonusAmount = BONUS_TRIMESTRAL;
-                else if (Number(valorPago) === VALOR_MENSAL) bonusAmount = BONUS_MENSAL;
-                else if (Number(valorPago) === VALOR_SEMANAL) bonusAmount = BONUS_SEMANAL;
-                
-                if (bonusAmount > 0) {
+                    // 2. Buscamos os dados do usuário que pagou para ver se ele foi indicado
                     const payingUser = await registeredUsers.findOne({ userId: userId });
+
+                    // 3. Checamos as condições:
+                    //    - Ele foi indicado por alguém (o campo 'referredBy' existe)?
+                    //    - O bônus para esta indicação ainda não foi pago?
+                    //    - (NOVA CONDIÇÃO) O histórico de pagamentos dele está vazio?
                     if (payingUser && payingUser.referredBy && !payingUser.referralBonusPaid && (!payingUser.paymentHistory || payingUser.paymentHistory.length === 0)) {
                         const referrerId = payingUser.referredBy;
-                        await userBalances.updateOne({ userId: referrerId }, { $inc: { balance: bonusAmount } }, { upsert: true });
-                        await registeredUsers.updateOne({ userId: userId }, { $set: { referralBonusPaid: true } });
+                        console.log(`[Bônus] Usuário NOVO ${userId} foi indicado por ${referrerId}. Processando bônus.`);
+
+                        try {
+                            // 4. Adiciona R$ 50 ao saldo do indicador
+                            await userBalances.updateOne(
+                                { userId: referrerId },
+                                { $inc: { balance: 50 } },
+                                { upsert: true } // Cria o documento de saldo se ele não existir
+                            );
+
+                            // 5. Marca que o bônus foi pago para não pagar de novo
+                            await registeredUsers.updateOne(
+                                { userId: userId },
+                                { $set: { referralBonusPaid: true } }
+                            );
+
+                            console.log(`[Bônus] R$ 50 creditados com sucesso para ${referrerId}.`);
+
+                            // (Opcional, mas recomendado) Enviar um log para um canal
+                            const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
+                            const referrerMember = await guild.members.fetch(referrerId).catch(() => null);
+                            const payingMember = await guild.members.fetch(userId).catch(() => null);
+
+                            if (logChannel) {
+                                const bonusEmbed = new EmbedBuilder()
+                                    .setTitle('💸 Bônus de Indicação Creditado')
+                                    .setDescription(`Um bônus de indicação foi pago com sucesso para um **novo assinante**!`)
+                                    .setColor('#FFD700')
+                                    .addFields(
+                                        { name: 'Indicador (Recebeu o Bônus)', value: `${referrerMember ? referrerMember.user.tag : `ID: ${referrerId}`}`, inline: false },
+                                        { name: 'Novo Assinante (Gerou o Bônus)', value: `${payingMember ? payingMember.user.tag : `ID: ${userId}`}`, inline: false },
+                                        { name: '💰 Valor do Bônus', value: '`R$ 50,00`', inline: true },
+                                        { name: '✅ Status', value: '`Creditado`', inline: true }
+                                    )
+                                    .setTimestamp();
+                                await logChannel.send({ embeds: [bonusEmbed] });
+                            }
+
+                        } catch (err) {
+                            console.error(`[Bônus] Falha crítica ao processar o bônus para o indicador ${referrerId}:`, err);
+                        }
+                    } else {
+                        console.log(`[Bônus] Nenhuma indicação válida, bônus já pago ou usuário não é novo. Nenhuma ação para ${userId}.`);
                     }
                 }
+                const duration = (Number(valorPago) === 100 || (balanceUsed && Number(valorPago) + Number(balanceUsed) === 100)) ? 7 : 30;
+    
+                let newExpirationDate;
+                const existingExpiration = await expirationDates.findOne({ userId });
+
+                if (existingExpiration && new Date(existingExpiration.expirationDate) > now) {
+                    newExpirationDate = new Date(existingExpiration.expirationDate);
+                } else {
+                    newExpirationDate = new Date(now);
+                }
                 
+                newExpirationDate.setDate(newExpirationDate.getDate() + duration);
+                
+                await expirationDates.updateOne({ userId }, { $set: { expirationDate: newExpirationDate } }, { upsert: true });
                 await registeredUsers.updateOne({ userId }, { $push: { paymentHistory: { amount: valorPago, timestamp: now, reference: paymentReference } } });
-
-                const confirmationEmbed = new EmbedBuilder()
-                    .setTitle('✅ Pagamento Confirmado!')
-                    .setColor('#00FF00').setTimestamp().setFooter({ text: 'Agradecemos a sua preferência!' });
                 
+                try {
+                    const guild = await client.guilds.fetch(GUILD_ID);
+                    const member = await guild.members.fetch(userId);
+    
+                    if (member) {
+                        await member.roles.add(VIP_ROLE_ID);
+                        await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID);
+                        console.log(`[Webhook Fallback] Cargos VIP adicionados diretamente para o usuário ${userId}.`);
+                    }
+                } catch (roleError) {
+                    console.error(`[Webhook Fallback] Erro ao tentar aplicar cargos diretamente para ${userId}:`, roleError);
+                    // Mesmo que isso falhe, o Change Stream ainda pode funcionar se estiver online.
+                }
+
+                // --- LÓGICA DE CONFIRMAÇÃO NO CANAL (AGORA CONDICIONAL) ---
+                const confirmationEmbed = new EmbedBuilder()
+                    .setTitle('✅ Pagamento Confirmado e Assinatura Ativada!')
+                    .setColor('#00FF00')
+                    .setTimestamp()
+                    .setFooter({ text: 'Agradecemos a sua preferência!' });
                 if (balanceUsed && balanceUsed > 0) {
-                    confirmationEmbed.setDescription(`Pagamento processado com sucesso utilizando seu saldo de bônus!`);
-                    confirmationEmbed.addFields(
-                        { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
-                        { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true },
-                        ...confirmationEmbedFields
-                    );
+                    // MENSAGEM PARA PAGAMENTO COM DESCONTO
+                    confirmationEmbed
+                        .setDescription(`Pagamento processado com sucesso utilizando seu saldo de bônus!`)
+                        .addFields(
+                            { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
+                            { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true },
+                            { name: '⏳ Duração Adicionada', value: `${duration} dias` },
+                            { name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) },
+                            { name: '🚀 Acesso Liberado', value: 'Seu cargo VIP já foi atualizado!' }
+                        );
                 } else {
-                    confirmationEmbed.setDescription(confirmationEmbedDescription);
-                    confirmationEmbed.addFields(confirmationEmbedFields);
+                    // MENSAGEM PARA PAGAMENTO NORMAL (SEM DESCONTO)
+                    confirmationEmbed
+                        .setDescription(`O pagamento de ${member.user.username} foi processado com sucesso!`)
+                        .addFields(
+                            { name: '💸 Valor Pago', value: `R$ ${valorPago.toFixed(2)}`, inline: true },
+                            { name: '⏳ Duração Adicionada', value: `${duration} dias`, inline: true },
+                            { name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) },
+                            { name: '🚀 Acesso Liberado', value: 'Seu cargo VIP já foi atualizado!' }
+                        );
                 }
-
+                
                 const channelRecord = await activePixChannels.findOne({ userId: userId });
-                if (channelRecord && channelRecord.channelId) {
-                    const paymentChannel = await guild.channels.fetch(channelRecord.channelId).catch(() => null);
-                    if (paymentChannel) await paymentChannel.send({ content: `<@${userId}>`, embeds: [confirmationEmbed] });
-                    else await member.send({ embeds: [confirmationEmbed] }).catch(() => {});
-                    await activePixChannels.deleteOne({ userId: userId });
+                const channelId = channelRecord ? channelRecord.channelId : null;
+                if (channelId) {
+                    try {
+                        const paymentChannel = await guild.channels.fetch(channelId);
+                        await paymentChannel.send({ content: `<@${userId}>`, embeds: [confirmationEmbed] });
+                        await activePixChannels.deleteOne({ userId: userId });
+                    } catch (channelError) {
+                        await member.send({ embeds: [confirmationEmbed] }).catch(dmError => console.error('Falha ao enviar DM de fallback.', dmError));
+                    }
                 } else {
-                    await member.send({ embeds: [confirmationEmbed] }).catch(() => {});
+                    await member.send({ embeds: [confirmationEmbed] }).catch(dmError => console.error('Falha ao enviar DM.', dmError));
                 }
-
-                // Lógica de Logs e Dedução de Saldo
-                const horarioFormatado = now.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-                const logBotChannel = await guild.channels.fetch(LOG_PAGAMENTOS_ID);
-                const embedPagamentoAprovado = new EmbedBuilder()
-                    .setTitle('💰 Pagamento Aprovado').setDescription('Um novo pagamento foi aprovado!').setColor('#00FF00')
-                    .addFields(
-                        { name: '👤 Usuário', value: `\`${member.user.username} (ID: ${userId})\`` },
-                        { name: '💸 Valor', value: `\`R$${valorPago.toFixed(2)}\``, inline: true },
-                        { name: '📝 Referência', value: `\`${paymentIntent.id}\``, inline: true },                        { name: '⏳ Duração', value: `\`${durationForLog}\``, inline: true },
-                        { name: '🕒 Horário', value: `\`${horarioFormatado}\`` }
-                    ).setTimestamp();
-                await logBotChannel.send({ embeds: [embedPagamentoAprovado] });
+                // --- LÓGICA DE LOGS ---
+                try {
+                    const logBotChannel = await guild.channels.fetch(LOG_PAGAMENTOS_ID);
+                    const embedPagamentoAprovado = new EmbedBuilder()
+                        .setTitle('💰 Pagamento Aprovado')
+                        .setDescription('Um novo pagamento foi aprovado!')
+                        .setColor('#00FF00')
+                        .addFields(
+                            { name: '👤 Usuário', value: `\`${member.user.username} (ID: ${userId})\`` },
+                            { name: '💸 Valor', value: `\`R$${valorPago.toFixed(2)}\``, inline: true },
+                            { name: '📝 Referência', value: `\`${paymentDetails.id}\``, inline: true },
+                            { name: '⏳ Duração', value: `\`${duration} dias\``, inline: true },
+                            { name: '🕒 Horário', value: `\`${horarioFormatado}\`` }
+                        )
+                        .setTimestamp();
+                    await logBotChannel.send({ embeds: [embedPagamentoAprovado] });
+                } catch (err) {
+                    console.error("Erro ao enviar log para LOG_PAGAMENTOS_ID:", err);
+                }
                 if (balanceUsed && balanceUsed > 0) {
                 try {
                     await userBalances.updateOne({ userId: userId }, { $inc: { balance: -balanceUsed } });
@@ -1061,27 +1243,16 @@ app.post('/webhook-stripe', express.raw({ type: 'application/json' }), async (re
                     console.error("Erro ao enviar log de renovação genérico para LOGS_BOTS_ID:", err);
                 }
             }
-        } catch (error) {
-            console.error('[Stripe Webhook] Erro CRÍTICO ao processar evento:', error);
         }
-}}
-);
+    }catch (error) {
+        console.error('[API] Erro CRÍTICO ao processar webhook do Mercado Pago:', error);
+    }
+}
+});
 
 // Quando o bot estiver online
 client.once('clientReady', async () => {
     console.log(`✅ Bot online como ${client.user.tag}`);
-
-    // --- INÍCIO DAS NOVAS CHAMADAS DE AUDITORIA ---
-    
-    /* 1. Executa a auditoria uma vez na inicialização
-    console.log('[Inicialização] Executando auditoria inicial de cargos VIP...');
-    await auditVipRoles();
-
-    // 2. Agenda a auditoria para rodar a cada 6 horas
-    setInterval(auditVipRoles, 6 * 60 * 60 * 1000);
-    console.log('[Inicialização] Auditoria de cargos VIP agendada para ser executada a cada 6 horas.');
-
-    *///--- FIM DAS NOVAS CHAMADAS DE AUDITORIA ---
 
     const guild = await client.guilds.fetch(GUILD_ID);
 
@@ -1093,6 +1264,16 @@ client.once('clientReady', async () => {
         SendMessages: false,
         ReadMessageHistory: true,
     });
+    
+    console.log('[Audit] Executando auditoria inicial de cargos VIP...');
+    await auditVipRoles(); // Executa a auditoria uma vez na inicialização
+
+    // Agenda a auditoria para rodar periodicamente
+    setInterval(async () => {
+        await auditVipRoles();
+    }, 6 * 60 * 60 * 1000); // Roda a cada 6 horas
+
+    console.log('[Audit] Auditoria de cargos VIP agendada para rodar a cada 6 horas.');
     
     const embedRegistro = new EmbedBuilder()
         .setTitle('📝 Registro de Cliente')
@@ -1131,7 +1312,7 @@ client.once('clientReady', async () => {
             `Clique nos botões abaixo para gerenciar sua conta:\n\n` +
             `📌 Como funciona?\n\nClique no botão abaixo para adicionar saldo à sua conta.\n\n` +
             `⚠️ Importante!\n\nAntes de fazer qualquer pagamento, lembre-se de que não há reembolsos para adição de créditos. \n\n` +
-            `💰 Valores\n\nPara ativar sua assinatura pela primeira vez, você precisa ter pelo menos R$ 200,00 ou R$ 500,00 de saldo.\n\n` +
+            `💰 Valores\n\nPara ativar sua assinatura pela primeira vez, você precisa ter pelo menos R$ 100,00 ou R$ 300,00 de saldo.\n\n` +
             `💡 *Se você não estiver registrado, clique em **#registrar-se** primeiro.*`
         )
         .setColor('#FFD700');
@@ -1342,7 +1523,7 @@ client.on('interactionCreate', async (interaction) => {
 
             const inputValor = new TextInputBuilder()
                 .setCustomId('valor')
-                .setLabel('Valor desejado (ex: 200 ou 500 ou 1200)')
+                .setLabel('Valor desejado (ex: 100 ou 300)')
                 .setStyle(TextInputStyle.Short)
                 .setPlaceholder('Digite o valor em reais')
                 .setRequired(false);
@@ -1372,7 +1553,9 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 
-    const newIndicationCoupons = ['CUPOM'];
+    const newIndicationCoupons = ['SOUZASETE', 'MT', 'RNUNES', 'DG', 'GREENZADA', 'BLACKGG', 
+    'COQUIN7', 'NIKEGREEN', 'THCARRILLO', 'GOMESCITY', 'ITZGOD', 'CRUSHER', 
+    'VICENTE', 'VINNY10', 'DIONIS', 'ORIENTES', 'UBITA', 'ROSENDO', 'LONTRA' ];
 
 // SUBSTITUA TODA A INTERAÇÃO 'formulario_saldo' POR ESTA
 if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') {
@@ -1482,61 +1665,65 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
             return;
         }
 
-        const planoTrimestral = 1200;
-        const planoMensal = 1;
-        const planoSemanal = 200;
-        
+        const planoSemanal = 1;
+        const planoMensal = 2;
         let valorFinalAPagar = 0;
         let saldoUtilizado = 0;
         let duration = 0;
-        
+
+        // Busca dados do usuário para verificar histórico
+        const userHistoryDoc = await registeredUsers.findOne({ userId });
+        // Verifica se o usuário JÁ TEM algum pagamento registrado no histórico
+        const isFirstPurchase = !userHistoryDoc || !userHistoryDoc.paymentHistory || userHistoryDoc.paymentHistory.length === 0;
+
         const balanceDoc = await userBalances.findOne({ userId });
         const saldoDisponivel = balanceDoc ? balanceDoc.balance : 0;
-
-        const valorTrimestralComDesconto = Math.max(1, planoTrimestral - saldoDisponivel);
         const valorMensalComDesconto = Math.max(1, planoMensal - saldoDisponivel);
-        const valorSemanalComDesconto = Math.max(1, planoSemanal - saldoDisponivel);
 
-        if (saldoDisponivel > 0 && valorInput === valorTrimestralComDesconto) {
-            valorFinalAPagar = valorTrimestralComDesconto;
-            saldoUtilizado = planoTrimestral - valorFinalAPagar;
-            duration = 90;
-        } else if (saldoDisponivel > 0 && valorInput === valorMensalComDesconto) {
+        // A ordem das verificações foi ajustada para evitar conflitos
+        if (saldoDisponivel > 0 && valorInput === valorMensalComDesconto) {
+            // 1º VERIFICA O PAGAMENTO COM DESCONTO (MENSAL)
             valorFinalAPagar = valorMensalComDesconto;
             saldoUtilizado = planoMensal - valorFinalAPagar;
             duration = 30;
-        } else if (saldoDisponivel > 0 && valorInput === valorSemanalComDesconto) {
-            valorFinalAPagar = valorSemanalComDesconto;
-            saldoUtilizado = planoSemanal - valorFinalAPagar;
-            duration = 7;
-        } else if (valorInput === planoTrimestral) {
-            valorFinalAPagar = planoTrimestral;
-            duration = 90;
         } else if (valorInput === planoMensal) {
+            // 2º VERIFICA O PAGAMENTO MENSAL CHEIO
             valorFinalAPagar = planoMensal;
+            saldoUtilizado = 0;
             duration = 30;
         } else if (valorInput === planoSemanal) {
+            // 3º VERIFICA O PAGAMENTO SEMANAL
+            
+            // --- TRAVA PARA NOVOS USUÁRIOS ---
+            if (isFirstPurchase) {
+                await interaction.editReply({ 
+                    content: '❌ **Atenção!**\n\nComo esta é sua **primeira assinatura**, é necessário contratar o plano **Mensal** (R$ 300,00).\n\nO plano Semanal será liberado para você automaticamente nas próximas renovações!' 
+                });
+                return;
+            }
+            // ----------------------------------
+
             valorFinalAPagar = planoSemanal;
+            saldoUtilizado = 0;
             duration = 7;
         } else {
-            let errorMessage = `❌ Valor inválido de R$ ${valorInput.toFixed(2)}.\n\n` +
-                               `**Opções de Assinatura:**\n` +
-                               `- **R$ ${planoSemanal.toFixed(2)}** (VIP Semanal)\n` +
-                               `- **R$ ${planoMensal.toFixed(2)}** (VIP Mensal)\n` +
-                               `- **R$ ${planoTrimestral.toFixed(2)}** (VIP Trimestral)`;
+            // SE NENHUMA CONDIÇÃO FOR ATENDIDA, O VALOR É INVÁLIDO
+            let errorMessage = `❌ Valor inválido de R$ ${valorInput.toFixed(2)}.\n\nAs opções de pagamento são:\n`;
+            
+            // Exibe mensagem diferente dependendo se é usuário novo ou antigo
+            if (isFirstPurchase) {
+                errorMessage += `- **R$ ${planoMensal.toFixed(2)}** (Plano Mensal - Obrigatório na 1ª vez)`;
+            } else {
+                errorMessage += `- **R$ ${planoSemanal.toFixed(2)}** (Plano Semanal)\n- **R$ ${planoMensal.toFixed(2)}** (Plano Mensal)`;
+            }
 
             if (saldoDisponivel > 0) {
-                errorMessage += `\n\n**Com seu saldo, você também pode pagar:**\n` +
-                                `- **R$ ${valorSemanalComDesconto.toFixed(2)}** (VIP Semanal com desconto)\n` +
-                                `- **R$ ${valorMensalComDesconto.toFixed(2)}** (VIP Mensal com desconto)\n` +
-                                `- **R$ ${valorTrimestralComDesconto.toFixed(2)}** (VIP Trimestral com desconto)`;
+                errorMessage += `\n- **R$ ${valorMensalComDesconto.toFixed(2)}** (Plano Mensal com seu desconto)`;
             }
-            
             await interaction.editReply({ content: errorMessage });
             return;
         }
         // --- FIM DA LÓGICA DE VALIDAÇÃO DE VALOR ---
-        
         console.log('[Debug] 6. Validação de valor concluída. Editando resposta para "Gerando pagamento"...');
         await interaction.editReply({ content: '⏳ Gerando seu pagamento, por favor aguarde...' });
         console.log('[Debug] 7. Resposta editada. Iniciando criação do canal de pagamento...');
@@ -1583,7 +1770,7 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
         try {
             // A chamada agora usa as variáveis validadas
             console.log('[Debug] 8. Canal de pagamento definido. Chamando a API do Mercado Pago...');
-            const paymentInfo = await createStripePayment(userId, valorFinalAPagar, duration, saldoUtilizado);
+            const paymentInfo = await createMercadoPagoPayment(userId, valorFinalAPagar, duration, saldoUtilizado);
             console.log('[Debug] 9. Resposta da API do Mercado Pago recebida com sucesso.');
             
             const qrCodeBuffer = Buffer.from(paymentInfo.qrCodeBase64, 'base64');
@@ -1761,3 +1948,7 @@ app.listen(PORT, async () => {
         process.exit(1);
     }
 });
+/*git
+git remote add origem https://github.com/guskaxd/bot-ghost.git
+git push -u origin main
+*/
