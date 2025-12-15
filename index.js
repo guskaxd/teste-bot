@@ -747,7 +747,7 @@ async function checkExpirationNow(userId, expirationDate) {
         console.log(`[Debug] Assinatura de ${userId} expirada. Verificando saldo para renovação automática...`);
         
         // Define o custo do plano
-        const CUSTO_PLANO_MENSAL = 2; 
+        const CUSTO_PLANO_MENSAL = 199.90; 
     
         // Busca o saldo do usuário
         const balanceDoc = await userBalances.findOne({ userId });
@@ -1055,7 +1055,8 @@ app.post('/webhook-mercadopago', async (req, res) => {
                 }
 
                 // 1. Verificamos se o pagamento é o mensal (R$ 300)
-                if (Number(valorPago) === 2) {
+                // 1. Verificamos se o pagamento é o mensal (R$ 199.90 ou 199)
+if (Math.abs(Number(valorPago) - 199.90) < 0.1 || Number(valorPago) === 199) {
                     console.log(`[Bônus] Pagamento de R$ 300 detectado para ${userId}. Verificando indicação...`);
 
                     // 2. Buscamos os dados do usuário que pagou para ver se ele foi indicado
@@ -1312,7 +1313,7 @@ client.once('clientReady', async () => {
             `Clique nos botões abaixo para gerenciar sua conta:\n\n` +
             `📌 Como funciona?\n\nClique no botão abaixo para adicionar saldo à sua conta.\n\n` +
             `⚠️ Importante!\n\nAntes de fazer qualquer pagamento, lembre-se de que não há reembolsos para adição de créditos. \n\n` +
-            `💰 Valores\n\nPara ativar sua assinatura pela primeira vez, você precisa ter pelo menos R$ 100,00 ou R$ 300,00 de saldo.\n\n` +
+            `💰 Valores\n\nPara ativar sua assinatura pela primeira vez, você precisa ter pelo menos R$ 100,00 ou R$ 199,90 de saldo.\n\n` +
             `💡 *Se você não estiver registrado, clique em **#registrar-se** primeiro.*`
         )
         .setColor('#FFD700');
@@ -1659,66 +1660,81 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
             return;
         }
 
-        const valorInput = parseFloat(valorInputStr);
+        const valorInput = parseFloat(valorInputStr.replace(',', '.'));
+
         if (isNaN(valorInput) || valorInput <= 0) {
             await interaction.editReply({ content: '❌ Por favor, insira um valor numérico válido e positivo.' });
             return;
         }
 
-        const planoSemanal = 1;
-        const planoMensal = 2;
+        const planoSemanal = 100;
+        const targetMensal = 199.90; 
+        
+        // Função que diz "SIM" se o valor for 199.90 (com margem de erro mínima) OU se for 199 redondo
+        const isMensal = (v) => Math.abs(v - targetMensal) < 0.1 || v === 199;
+
         let valorFinalAPagar = 0;
         let saldoUtilizado = 0;
         let duration = 0;
 
         // Busca dados do usuário para verificar histórico
         const userHistoryDoc = await registeredUsers.findOne({ userId });
-        // Verifica se o usuário JÁ TEM algum pagamento registrado no histórico
+        // Verifica se é a primeira compra (histórico vazio ou inexistente)
         const isFirstPurchase = !userHistoryDoc || !userHistoryDoc.paymentHistory || userHistoryDoc.paymentHistory.length === 0;
 
         const balanceDoc = await userBalances.findOne({ userId });
         const saldoDisponivel = balanceDoc ? balanceDoc.balance : 0;
-        const valorMensalComDesconto = Math.max(1, planoMensal - saldoDisponivel);
+        
+        // Calcula quanto falta para inteirar o mensal (mínimo de R$ 1)
+        const valorMensalComDesconto = Math.max(1, targetMensal - saldoDisponivel);
 
-        // A ordem das verificações foi ajustada para evitar conflitos
-        if (saldoDisponivel > 0 && valorInput === valorMensalComDesconto) {
-            // 1º VERIFICA O PAGAMENTO COM DESCONTO (MENSAL)
+        // --- LÓGICA DE DECISÃO ---
+
+        // 1º CASO: PAGAMENTO COM DESCONTO (SALDO > 0)
+        // Verifica se o valor digitado bate com o cálculo do desconto (aceitando pequena margem de erro)
+        if (saldoDisponivel > 0 && Math.abs(valorInput - valorMensalComDesconto) < 0.1) {
             valorFinalAPagar = valorMensalComDesconto;
-            saldoUtilizado = planoMensal - valorFinalAPagar;
+            saldoUtilizado = targetMensal - valorFinalAPagar; // O que resta é pago com saldo
             duration = 30;
-        } else if (valorInput === planoMensal) {
-            // 2º VERIFICA O PAGAMENTO MENSAL CHEIO
-            valorFinalAPagar = planoMensal;
+
+        } 
+        // 2º CASO: PAGAMENTO MENSAL CHEIO (199 ou 199,90)
+        else if (isMensal(valorInput)) {
+            valorFinalAPagar = valorInput; // Cobra exatamente o que o usuário digitou
             saldoUtilizado = 0;
             duration = 30;
-        } else if (valorInput === planoSemanal) {
-            // 3º VERIFICA O PAGAMENTO SEMANAL
+
+        } 
+        // 3º CASO: PAGAMENTO SEMANAL (100)
+        else if (valorInput === planoSemanal) {
             
             // --- TRAVA PARA NOVOS USUÁRIOS ---
             if (isFirstPurchase) {
                 await interaction.editReply({ 
-                    content: '❌ **Atenção!**\n\nComo esta é sua **primeira assinatura**, é necessário contratar o plano **Mensal** (R$ 300,00).\n\nO plano Semanal será liberado para você automaticamente nas próximas renovações!' 
+                    content: `❌ **Atenção!**\n\nComo esta é sua **primeira assinatura**, é necessário contratar o plano **Mensal** (R$ ${targetMensal.toFixed(2).replace('.', ',')}).\n\nO plano Semanal será liberado para você automaticamente nas próximas renovações!` 
                 });
-                return;
+                return; // Bloqueia e encerra aqui
             }
             // ----------------------------------
 
             valorFinalAPagar = planoSemanal;
             saldoUtilizado = 0;
             duration = 7;
+
         } else {
-            // SE NENHUMA CONDIÇÃO FOR ATENDIDA, O VALOR É INVÁLIDO
-            let errorMessage = `❌ Valor inválido de R$ ${valorInput.toFixed(2)}.\n\nAs opções de pagamento são:\n`;
+            // SE NENHUMA CONDIÇÃO FOR ATENDIDA, MOSTRA ERRO COM OS VALORES CERTOS
+            let errorMessage = `❌ Valor inválido de R$ ${valorInput.toFixed(2).replace('.', ',')}.\n\nAs opções de pagamento são:\n`;
             
-            // Exibe mensagem diferente dependendo se é usuário novo ou antigo
             if (isFirstPurchase) {
-                errorMessage += `- **R$ ${planoMensal.toFixed(2)}** (Plano Mensal - Obrigatório na 1ª vez)`;
+                // Mensagem específica para novatos
+                errorMessage += `- **R$ ${targetMensal.toFixed(2).replace('.', ',')}** (Plano Mensal - Obrigatório na 1ª vez)`;
             } else {
-                errorMessage += `- **R$ ${planoSemanal.toFixed(2)}** (Plano Semanal)\n- **R$ ${planoMensal.toFixed(2)}** (Plano Mensal)`;
+                // Mensagem para veteranos
+                errorMessage += `- **R$ ${planoSemanal.toFixed(2).replace('.', ',')}** (Plano Semanal)\n- **R$ ${targetMensal.toFixed(2).replace('.', ',')}** (Plano Mensal)`;
             }
 
             if (saldoDisponivel > 0) {
-                errorMessage += `\n- **R$ ${valorMensalComDesconto.toFixed(2)}** (Plano Mensal com seu desconto)`;
+                errorMessage += `\n- **R$ ${valorMensalComDesconto.toFixed(2).replace('.', ',')}** (Plano Mensal com seu desconto)`;
             }
             await interaction.editReply({ content: errorMessage });
             return;
