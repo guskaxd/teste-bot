@@ -17,7 +17,7 @@ const {
 
 const { MongoClient, ObjectId } = require('mongodb');
 const express = require('express');
-const { MercadoPagoConfig, Payment } = require('mercadopago');
+const axios = require('axios');
 require('dotenv').config();
 // Definindo o client antes de usá-lo
 const client = new Client({
@@ -33,27 +33,29 @@ const client = new Client({
 const app = express();
 app.use(express.json());
 
-// --- Cliente do Mercado Pago (da antiga API) ---
-// ATENÇÃO: Renomeado para 'mpClient' para não conflitar com o 'client' do Discord
-const mpClient = new MercadoPagoConfig({
-    accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN,
+const asaasClient = axios.create({
+    baseURL: process.env.ASAAS_URL || 'https://www.asaas.com/api/v3', // Use 'https://sandbox.asaas.com/api/v3' para testes
+    headers: {
+        'access_token': process.env.ASAAS_API_KEY,
+        'Content-Type': 'application/json'
+    }
 });
 
 // IDs do servidor
-const GUILD_ID = '1417557260095328438'; 
-const CANAL_PAINEL_ID = '1417583842256224337';
-const CATEGORIA_PAGAMENTOS_ID = '1417568378637254857';
-const REGISTRADO_ROLE_ID = '1417567838192799945';
-const VIP_ROLE_ID = '1417567360545460325';
-const AGUARDANDO_PAGAMENTO_ROLE_ID = '1417567895868932199';
-const CANAL_REGISTRO_ID = '1417583803194675323';
-const LOG_PAGAMENTOS_ID = '1417557261189910580';
-const LOGS_BOTS_ID = '1417566269263183952';
-const NOTIFICACOES_ID = '1417566342823018566';
-const CANAL_WHATSAPP_ID = '1417566470333796402';
-const EXCLUIDOS_ID = '1417566387399819304';
-const LOG_COUPONS_ID = '1417566495776575559';
-const CATEGORIA_EXPIRATIONS_ID = '1417568449965592777';
+const GUILD_ID = '1403745828635414659'; 
+const CANAL_PAINEL_ID = '1403762758931185747';
+const CATEGORIA_PAGAMENTOS_ID = '1403834750568894626';
+const REGISTRADO_ROLE_ID = '1403759346797514824';
+const VIP_ROLE_ID = '1403759523663052821';
+const AGUARDANDO_PAGAMENTO_ROLE_ID = '1403760210660687942';
+const CANAL_REGISTRO_ID = '1403762565443489804';
+const LOG_PAGAMENTOS_ID = '1403800340696137728';
+const LOGS_BOTS_ID = '1403800395926474782';
+const NOTIFICACOES_ID = '1403800130578284615';
+const CANAL_WHATSAPP_ID = '1403800265953644544';
+const EXCLUIDOS_ID = '1403800479250513992';
+const LOG_COUPONS_ID = '1403800214242066493';
+const CATEGORIA_EXPIRATIONS_ID = '1403837229247500380';
 
 // Conexão com MongoDB
 const mongoUri = process.env.MONGO_URI;
@@ -747,7 +749,7 @@ async function checkExpirationNow(userId, expirationDate) {
         console.log(`[Debug] Assinatura de ${userId} expirada. Verificando saldo para renovação automática...`);
         
         // Define o custo do plano
-        const CUSTO_PLANO_MENSAL = 199.90; 
+        const CUSTO_PLANO_MENSAL = 2; 
     
         // Busca o saldo do usuário
         const balanceDoc = await userBalances.findOne({ userId });
@@ -950,43 +952,66 @@ app.get('/', (req, res) => {
     res.status(200).send('API e da Comunidade Ghost Services estão online e funcionando!');
 });
 
-async function createMercadoPagoPayment(userId, valor, duration, saldoUtilizado = 0) { // <--- A CORREÇÃO ESTÁ AQUI
-    console.log(`[PaymentFunc] Iniciando pagamento para userId: ${userId}, valor: ${valor}, saldo usado: ${saldoUtilizado}`);
+// Função auxiliar para obter/criar cliente no Asaas
+async function getAsaasCustomer(userId, name) {
     try {
-        const paymentData = {
-            transaction_amount: Number(valor),
-            description: `Taxa de acesso (${duration} dias)`,
-            payment_method_id: 'pix',
-            payer: { email: `user-${userId}@ghost.services`},
-            external_reference: userId,
-            notification_url: `${process.env.APP_URL}/webhook-mercadopago`,
-            metadata: {
-                balance_used: saldoUtilizado
-            }
+        // Tenta buscar o cliente pelo externalReference (userId do Discord)
+        const response = await asaasClient.get(`/customers?externalReference=${userId}`);
+        if (response.data.data && response.data.data.length > 0) {
+            return response.data.data[0].id;
+        }
+
+        // Se não existir, cria um novo
+        const newCustomer = await asaasClient.post('/customers', {
+            name: name || `User Discord ${userId}`,
+            cpfCnpj: process.env.CPF_PADRAO_ASAAS, // Opcional se não for obrigatório na sua conta, mas recomendado
+            email: `user-${userId}@ghost.services`,
+            externalReference: userId
+        });
+        return newCustomer.data.id;
+    } catch (error) {
+        console.error('[Asaas] Erro ao gerenciar cliente:', error.response?.data || error.message);
+        // Fallback: Retorna um ID de cliente padrão definido no .env se der erro (Crie um cliente "Generico" no painel e pegue o ID)
+        return process.env.ASAAS_CUSTOMER_ID_GENERICO; 
+    }
+}
+
+async function createAsaasPayment(userId, valor, duration, saldoUtilizado = 0) {
+    console.log(`[PaymentFunc] Iniciando pagamento Asaas para userId: ${userId}, valor: ${valor}, saldo usado: ${saldoUtilizado}`);
+    
+    try {
+        // 1. Obtém o ID do cliente no Asaas
+        const customerId = await getAsaasCustomer(userId, `Cliente ${userId}`);
+        
+        // Truque: Passamos o userId E o saldoUtilizado no externalReference separados por "__"
+        // Isso permite recuperar esses dados no Webhook sem precisar de metadata complexo
+        const customReference = `${userId}__${saldoUtilizado}`;
+
+        const body = {
+            customer: customerId,
+            billingType: 'PIX',
+            value: Number(valor),
+            dueDate: new Date().toISOString().split('T')[0], // Vence hoje
+            description: `Acesso VIP - ${duration} dias`,
+            externalReference: customReference
         };
 
-        const payment = new Payment(mpClient);
+        // 2. Cria a cobrança
+        const response = await asaasClient.post('/payments', body);
+        const paymentId = response.data.id;
 
-        console.log('[PaymentFunc] [ETAPA 1/3] Preparando para enviar requisição para a API do Mercado Pago...');
-        
-        const result = await payment.create({ body: paymentData });
-        
-        console.log('[PaymentFunc] [ETAPA 2/3] Resposta recebida da API do Mercado Pago com sucesso.');
-        
-        const paymentInfo = {
-            paymentId: result.id,
-            qrCodeBase64: result.point_of_interaction.transaction_data.qr_code_base64,
-            copiaECola: result.point_of_interaction.transaction_data.qr_code
+        // 3. Obtém o QR Code (endpoint separado no Asaas)
+        const pixResponse = await asaasClient.get(`/payments/${paymentId}/pixQrCode`);
+
+        return {
+            paymentId: paymentId,
+            qrCodeBase64: pixResponse.data.encodedImage,
+            copiaECola: pixResponse.data.payload
         };
-
-        console.log('[PaymentFunc] [ETAPA 3/3] Pagamento processado e dados retornados.');
-        return paymentInfo;
 
     } catch (error) {
-        console.error('[PaymentFunc] ERRO CRÍTICO ao se comunicar com a API do Mercado Pago.');
-        console.error('Detalhes completos do erro:', error);
-        
-        throw new Error('Falha ao se comunicar com a API de pagamentos.');
+        console.error('[PaymentFunc] ERRO Asaas:', error.response ? error.response.data : error.message);
+        throw new Error('Falha ao comunicar com gateway de pagamento Asaas.');
     }
 }
 
@@ -1000,7 +1025,7 @@ app.post('/create-payment', async (req, res) => {
         }
 
         // Chama a nova função
-        const paymentInfo = await createMercadoPagoPayment(userId, valor, duration);
+        const paymentInfo = await createAsaasPayment(userId, valor, duration);
         
         res.json(paymentInfo);
 
@@ -1010,205 +1035,224 @@ app.post('/create-payment', async (req, res) => {
     }
 });
 
-// Substitua toda a sua rota de webhook por esta
-app.post('/webhook-mercadopago', async (req, res) => {
-    const { query } = req;
-    console.log('[API] Webhook recebido:', query);
+app.post('/webhook-asaas', async (req, res) => {
+    // No Asaas, os dados vêm no body, não na query
+    const { event, payment } = req.body;
+    console.log('[API] Webhook Asaas recebido. Evento:', event);
 
-    // Responde imediatamente ao Mercado Pago para evitar timeouts e reenvios
-    res.sendStatus(200);
+    // Responde imediatamente ao Asaas para evitar timeouts e reenvios
+    res.status(200).json({ received: true });
 
-    if (!query || !query['data.id']) {
-        console.log('[Webhook] Query inválida ou sem data.id. Ignorando.');
+    // Verificação básica se há dados
+    if (!event || !payment) {
+        console.log('[Webhook] Body inválido ou sem dados de pagamento. Ignorando.');
         return;
     }
 
-    if (query.type === 'payment') {
+    // Filtramos apenas pagamentos confirmados
+    if (event === 'PAYMENT_RECEIVED') {
         try {
-            const payment = new Payment(mpClient);
-            const paymentDetails = await payment.get({ id: query['data.id'] });
+            // --- ADAPTAÇÃO DE DADOS (ASAAS -> SUA LÓGICA) ---
+            // Recuperamos o userId e o saldoUsed que enviamos no externalReference (formato: "ID__SALDO")
+            // Se não tiver separador, assume que é só o ID e saldo é 0
+            const referenceParts = payment.externalReference ? payment.externalReference.split('__') : [];
+            const userId = referenceParts[0]; 
+            // Converte para Number, se não existir vira 0
+            const balanceUsed = referenceParts.length > 1 ? Number(referenceParts[1]) : 0; 
             
-            if (paymentDetails.status === 'approved') {
-                const userId = paymentDetails.external_reference;
-                const valorPago = paymentDetails.transaction_amount;
-                const now = new Date();
-                const paymentReference = `MP-${paymentDetails.id}`; // ID único do pagamento
-                const balanceUsed = paymentDetails.metadata?.balance_used;
-                const horarioFormatado = now.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+            const valorPago = payment.value; // No Asaas é 'value'
+            const now = new Date();
+            const paymentReference = `ASAAS-${payment.id}`; // Prefixo mudado para identificar a fonte
+            const horarioFormatado = now.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
-                const alreadyProcessed = await registeredUsers.findOne({ userId: userId, 'paymentHistory.reference': paymentReference });
-                if (alreadyProcessed) {
-                    console.log(`[Webhook] Pagamento ${paymentReference} já processado. Ignorando.`);
-                    return;
-                }
+            // --- AQUI COMEÇA A SUA LÓGICA ORIGINAL (INTACTA) ---
 
-                const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
-                if (!guild) {
-                    console.error('[Webhook] Não foi possível encontrar o servidor (GUILD). Abortando.');
-                    return;
-                }
-    
-                const member = await guild.members.fetch(userId).catch(() => null);
-                if (!member) {
-                    console.error(`[Webhook] Não foi possível encontrar o membro com ID ${userId} no servidor. Abortando.`);
-                    return;
-                }
+            const alreadyProcessed = await registeredUsers.findOne({ userId: userId, 'paymentHistory.reference': paymentReference });
+            if (alreadyProcessed) {
+                console.log(`[Webhook] Pagamento ${paymentReference} já processado. Ignorando.`);
+                return;
+            }
 
-                // 1. Verificamos se o pagamento é o mensal (R$ 300)
-                // 1. Verificamos se o pagamento é o mensal (R$ 199.90 ou 199)
-if (Math.abs(Number(valorPago) - 199.90) < 0.1 || Number(valorPago) === 199) {
-                    console.log(`[Bônus] Pagamento de R$ 300 detectado para ${userId}. Verificando indicação...`);
+            const guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
+            if (!guild) {
+                console.error('[Webhook] Não foi possível encontrar o servidor (GUILD). Abortando.');
+                return;
+            }
 
-                    // 2. Buscamos os dados do usuário que pagou para ver se ele foi indicado
-                    const payingUser = await registeredUsers.findOne({ userId: userId });
+            const member = await guild.members.fetch(userId).catch(() => null);
+            if (!member) {
+                console.error(`[Webhook] Não foi possível encontrar o membro com ID ${userId} no servidor. Abortando.`);
+                return;
+            }
 
-                    // 3. Checamos as condições:
-                    //    - Ele foi indicado por alguém (o campo 'referredBy' existe)?
-                    //    - O bônus para esta indicação ainda não foi pago?
-                    //    - (NOVA CONDIÇÃO) O histórico de pagamentos dele está vazio?
-                    if (payingUser && payingUser.referredBy && !payingUser.referralBonusPaid && (!payingUser.paymentHistory || payingUser.paymentHistory.length === 0)) {
-                        const referrerId = payingUser.referredBy;
-                        console.log(`[Bônus] Usuário NOVO ${userId} foi indicado por ${referrerId}. Processando bônus.`);
+            // 1. Verificamos se o pagamento é o mensal (R$ 500)
+            // Nota: O Asaas retorna numbers, então a comparação funciona bem
+            if (Number(valorPago) === 2) {
+                console.log(`[Bônus] Pagamento de R$ 500 detectado para ${userId}. Verificando indicação...`);
 
-                        try {
-                            // 4. Adiciona R$ 50 ao saldo do indicador
-                            await userBalances.updateOne(
-                                { userId: referrerId },
-                                { $inc: { balance: 50 } },
-                                { upsert: true } // Cria o documento de saldo se ele não existir
-                            );
+                // 2. Buscamos os dados do usuário que pagou para ver se ele foi indicado
+                const payingUser = await registeredUsers.findOne({ userId: userId });
 
-                            // 5. Marca que o bônus foi pago para não pagar de novo
-                            await registeredUsers.updateOne(
-                                { userId: userId },
-                                { $set: { referralBonusPaid: true } }
-                            );
+                // 3. Checamos as condições:
+                if (payingUser && payingUser.referredBy && !payingUser.referralBonusPaid && (!payingUser.paymentHistory || payingUser.paymentHistory.length === 0)) {
+                    const referrerId = payingUser.referredBy;
+                    console.log(`[Bônus] Usuário NOVO ${userId} foi indicado por ${referrerId}. Processando bônus.`);
 
-                            console.log(`[Bônus] R$ 50 creditados com sucesso para ${referrerId}.`);
-
-                            // (Opcional, mas recomendado) Enviar um log para um canal
-                            const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
-                            const referrerMember = await guild.members.fetch(referrerId).catch(() => null);
-                            const payingMember = await guild.members.fetch(userId).catch(() => null);
-
-                            if (logChannel) {
-                                const bonusEmbed = new EmbedBuilder()
-                                    .setTitle('💸 Bônus de Indicação Creditado')
-                                    .setDescription(`Um bônus de indicação foi pago com sucesso para um **novo assinante**!`)
-                                    .setColor('#FFD700')
-                                    .addFields(
-                                        { name: 'Indicador (Recebeu o Bônus)', value: `${referrerMember ? referrerMember.user.tag : `ID: ${referrerId}`}`, inline: false },
-                                        { name: 'Novo Assinante (Gerou o Bônus)', value: `${payingMember ? payingMember.user.tag : `ID: ${userId}`}`, inline: false },
-                                        { name: '💰 Valor do Bônus', value: '`R$ 50,00`', inline: true },
-                                        { name: '✅ Status', value: '`Creditado`', inline: true }
-                                    )
-                                    .setTimestamp();
-                                await logChannel.send({ embeds: [bonusEmbed] });
-                            }
-
-                        } catch (err) {
-                            console.error(`[Bônus] Falha crítica ao processar o bônus para o indicador ${referrerId}:`, err);
-                        }
-                    } else {
-                        console.log(`[Bônus] Nenhuma indicação válida, bônus já pago ou usuário não é novo. Nenhuma ação para ${userId}.`);
-                    }
-                }
-                const duration = (Number(valorPago) === 100 || (balanceUsed && Number(valorPago) + Number(balanceUsed) === 100)) ? 7 : 30;
-    
-                let newExpirationDate;
-                const existingExpiration = await expirationDates.findOne({ userId });
-
-                if (existingExpiration && new Date(existingExpiration.expirationDate) > now) {
-                    newExpirationDate = new Date(existingExpiration.expirationDate);
-                } else {
-                    newExpirationDate = new Date(now);
-                }
-                
-                newExpirationDate.setDate(newExpirationDate.getDate() + duration);
-                
-                await expirationDates.updateOne({ userId }, { $set: { expirationDate: newExpirationDate } }, { upsert: true });
-                await registeredUsers.updateOne({ userId }, { $push: { paymentHistory: { amount: valorPago, timestamp: now, reference: paymentReference } } });
-                
-                try {
-                    const guild = await client.guilds.fetch(GUILD_ID);
-                    const member = await guild.members.fetch(userId);
-    
-                    if (member) {
-                        await member.roles.add(VIP_ROLE_ID);
-                        await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID);
-                        console.log(`[Webhook Fallback] Cargos VIP adicionados diretamente para o usuário ${userId}.`);
-                    }
-                } catch (roleError) {
-                    console.error(`[Webhook Fallback] Erro ao tentar aplicar cargos diretamente para ${userId}:`, roleError);
-                    // Mesmo que isso falhe, o Change Stream ainda pode funcionar se estiver online.
-                }
-
-                // --- LÓGICA DE CONFIRMAÇÃO NO CANAL (AGORA CONDICIONAL) ---
-                const confirmationEmbed = new EmbedBuilder()
-                    .setTitle('✅ Pagamento Confirmado e Assinatura Ativada!')
-                    .setColor('#00FF00')
-                    .setTimestamp()
-                    .setFooter({ text: 'Agradecemos a sua preferência!' });
-                if (balanceUsed && balanceUsed > 0) {
-                    // MENSAGEM PARA PAGAMENTO COM DESCONTO
-                    confirmationEmbed
-                        .setDescription(`Pagamento processado com sucesso utilizando seu saldo de bônus!`)
-                        .addFields(
-                            { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
-                            { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true },
-                            { name: '⏳ Duração Adicionada', value: `${duration} dias` },
-                            { name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) },
-                            { name: '🚀 Acesso Liberado', value: 'Seu cargo VIP já foi atualizado!' }
-                        );
-                } else {
-                    // MENSAGEM PARA PAGAMENTO NORMAL (SEM DESCONTO)
-                    confirmationEmbed
-                        .setDescription(`O pagamento de ${member.user.username} foi processado com sucesso!`)
-                        .addFields(
-                            { name: '💸 Valor Pago', value: `R$ ${valorPago.toFixed(2)}`, inline: true },
-                            { name: '⏳ Duração Adicionada', value: `${duration} dias`, inline: true },
-                            { name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) },
-                            { name: '🚀 Acesso Liberado', value: 'Seu cargo VIP já foi atualizado!' }
-                        );
-                }
-                
-                const channelRecord = await activePixChannels.findOne({ userId: userId });
-                const channelId = channelRecord ? channelRecord.channelId : null;
-                if (channelId) {
                     try {
-                        const paymentChannel = await guild.channels.fetch(channelId);
-                        await paymentChannel.send({ content: `<@${userId}>`, embeds: [confirmationEmbed] });
-                        await activePixChannels.deleteOne({ userId: userId });
-                    } catch (channelError) {
-                        await member.send({ embeds: [confirmationEmbed] }).catch(dmError => console.error('Falha ao enviar DM de fallback.', dmError));
+                        // 4. Adiciona R$ 50 ao saldo do indicador
+                        await userBalances.updateOne(
+                            { userId: referrerId },
+                            { $inc: { balance: 50 } },
+                            { upsert: true } // Cria o documento de saldo se ele não existir
+                        );
+
+                        // 5. Marca que o bônus foi pago para não pagar de novo
+                        await registeredUsers.updateOne(
+                            { userId: userId },
+                            { $set: { referralBonusPaid: true } }
+                        );
+
+                        console.log(`[Bônus] R$ 50 creditados com sucesso para ${referrerId}.`);
+
+                        // (Opcional, mas recomendado) Enviar um log para um canal
+                        const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
+                        const referrerMember = await guild.members.fetch(referrerId).catch(() => null);
+                        const payingMember = await guild.members.fetch(userId).catch(() => null);
+
+                        if (logChannel) {
+                            const bonusEmbed = new EmbedBuilder()
+                                .setTitle('💸 Bônus de Indicação Creditado')
+                                .setDescription(`Um bônus de indicação foi pago com sucesso para um **novo assinante**!`)
+                                .setColor('#FFD700')
+                                .addFields(
+                                    { name: 'Indicador (Recebeu o Bônus)', value: `${referrerMember ? referrerMember.user.tag : `ID: ${referrerId}`}`, inline: false },
+                                    { name: 'Novo Assinante (Gerou o Bônus)', value: `${payingMember ? payingMember.user.tag : `ID: ${userId}`}`, inline: false },
+                                    { name: '💰 Valor do Bônus', value: '`R$ 50,00`', inline: true },
+                                    { name: '✅ Status', value: '`Creditado`', inline: true }
+                                )
+                                .setTimestamp();
+                            await logChannel.send({ embeds: [bonusEmbed] });
+                        }
+
+                    } catch (err) {
+                        console.error(`[Bônus] Falha crítica ao processar o bônus para o indicador ${referrerId}:`, err);
                     }
                 } else {
-                    await member.send({ embeds: [confirmationEmbed] }).catch(dmError => console.error('Falha ao enviar DM.', dmError));
+                    console.log(`[Bônus] Nenhuma indicação válida, bônus já pago ou usuário não é novo. Nenhuma ação para ${userId}.`);
                 }
-                // --- LÓGICA DE LOGS ---
+            }
+            
+            // Lógica de Duração
+            const duration = (Number(valorPago) === 1 || (balanceUsed && Number(valorPago) + Number(balanceUsed) === 1)) ? 7 : 30;
+
+            let newExpirationDate;
+            const existingExpiration = await expirationDates.findOne({ userId });
+
+            if (existingExpiration && new Date(existingExpiration.expirationDate) > now) {
+                newExpirationDate = new Date(existingExpiration.expirationDate);
+            } else {
+                newExpirationDate = new Date(now);
+            }
+
+            newExpirationDate.setDate(newExpirationDate.getDate() + duration);
+
+            // Atualizações no Banco (Expiration e History)
+            await expirationDates.updateOne({ userId }, { $set: { expirationDate: newExpirationDate } }, { upsert: true });
+            
+            // Adicionamos um campo 'gateway: Asaas' para você saber a origem no futuro
+            await registeredUsers.updateOne({ userId }, { 
+                $push: { 
+                    paymentHistory: { 
+                        amount: valorPago, 
+                        timestamp: now, 
+                        reference: paymentReference,
+                        gateway: 'Asaas' 
+                    } 
+                } 
+            });
+
+            try {
+                const guild = await client.guilds.fetch(GUILD_ID);
+                const member = await guild.members.fetch(userId);
+
+                if (member) {
+                    await member.roles.add(VIP_ROLE_ID);
+                    await member.roles.remove(AGUARDANDO_PAGAMENTO_ROLE_ID);
+                    console.log(`[Webhook Fallback] Cargos VIP adicionados diretamente para o usuário ${userId}.`);
+                }
+            } catch (roleError) {
+                console.error(`[Webhook Fallback] Erro ao tentar aplicar cargos diretamente para ${userId}:`, roleError);
+            }
+
+            // --- LÓGICA DE CONFIRMAÇÃO NO CANAL (AGORA CONDICIONAL) ---
+            const confirmationEmbed = new EmbedBuilder()
+                .setTitle('✅ Pagamento Confirmado e Assinatura Ativada!')
+                .setColor('#00FF00')
+                .setTimestamp()
+                .setFooter({ text: 'Agradecemos a sua preferência!' });
+            
+            if (balanceUsed && balanceUsed > 0) {
+                // MENSAGEM PARA PAGAMENTO COM DESCONTO
+                confirmationEmbed
+                    .setDescription(`Pagamento processado com sucesso utilizando seu saldo de bônus!`)
+                    .addFields(
+                        { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
+                        { name: '💸 Valor Pago (PIX)', value: `R$ ${Number(valorPago).toFixed(2)}`, inline: true },
+                        { name: '⏳ Duração Adicionada', value: `${duration} dias` },
+                        { name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) },
+                        { name: '🚀 Acesso Liberado', value: 'Seu cargo VIP já foi atualizado!' }
+                    );
+            } else {
+                // MENSAGEM PARA PAGAMENTO NORMAL (SEM DESCONTO)
+                confirmationEmbed
+                    .setDescription(`O pagamento de ${member.user.username} foi processado com sucesso!`)
+                    .addFields(
+                        { name: '💸 Valor Pago', value: `R$ ${Number(valorPago).toFixed(2)}`, inline: true },
+                        { name: '⏳ Duração Adicionada', value: `${duration} dias`, inline: true },
+                        { name: '🗓️ Assinatura Expira em', value: newExpirationDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) },
+                        { name: '🚀 Acesso Liberado', value: 'Seu cargo VIP já foi atualizado!' }
+                    );
+            }
+
+            const channelRecord = await activePixChannels.findOne({ userId: userId });
+            const channelId = channelRecord ? channelRecord.channelId : null;
+            if (channelId) {
                 try {
-                    const logBotChannel = await guild.channels.fetch(LOG_PAGAMENTOS_ID);
-                    const embedPagamentoAprovado = new EmbedBuilder()
-                        .setTitle('💰 Pagamento Aprovado')
-                        .setDescription('Um novo pagamento foi aprovado!')
-                        .setColor('#00FF00')
-                        .addFields(
-                            { name: '👤 Usuário', value: `\`${member.user.username} (ID: ${userId})\`` },
-                            { name: '💸 Valor', value: `\`R$${valorPago.toFixed(2)}\``, inline: true },
-                            { name: '📝 Referência', value: `\`${paymentDetails.id}\``, inline: true },
-                            { name: '⏳ Duração', value: `\`${duration} dias\``, inline: true },
-                            { name: '🕒 Horário', value: `\`${horarioFormatado}\`` }
-                        )
-                        .setTimestamp();
-                    await logBotChannel.send({ embeds: [embedPagamentoAprovado] });
-                } catch (err) {
-                    console.error("Erro ao enviar log para LOG_PAGAMENTOS_ID:", err);
+                    const paymentChannel = await guild.channels.fetch(channelId);
+                    await paymentChannel.send({ content: `<@${userId}>`, embeds: [confirmationEmbed] });
+                    await activePixChannels.deleteOne({ userId: userId });
+                } catch (channelError) {
+                    await member.send({ embeds: [confirmationEmbed] }).catch(dmError => console.error('Falha ao enviar DM de fallback.', dmError));
                 }
-                if (balanceUsed && balanceUsed > 0) {
+            } else {
+                await member.send({ embeds: [confirmationEmbed] }).catch(dmError => console.error('Falha ao enviar DM.', dmError));
+            }
+
+            // --- LÓGICA DE LOGS ---
+            try {
+                const logBotChannel = await guild.channels.fetch(LOG_PAGAMENTOS_ID);
+                const embedPagamentoAprovado = new EmbedBuilder()
+                    .setTitle('💰 Pagamento Aprovado (Asaas)')
+                    .setDescription('Um novo pagamento foi aprovado!')
+                    .setColor('#00FF00')
+                    .addFields(
+                        { name: '👤 Usuário', value: `\`${member.user.username} (ID: ${userId})\`` },
+                        { name: '💸 Valor', value: `\`R$${Number(valorPago).toFixed(2)}\``, inline: true },
+                        { name: '📝 Referência', value: `\`${payment.id}\``, inline: true },
+                        { name: '⏳ Duração', value: `\`${duration} dias\``, inline: true },
+                        { name: '🕒 Horário', value: `\`${horarioFormatado}\`` }
+                    )
+                    .setTimestamp();
+                await logBotChannel.send({ embeds: [embedPagamentoAprovado] });
+            } catch (err) {
+                console.error("Erro ao enviar log para LOG_PAGAMENTOS_ID:", err);
+            }
+
+            if (balanceUsed && balanceUsed > 0) {
                 try {
                     await userBalances.updateOne({ userId: userId }, { $inc: { balance: -balanceUsed } });
                     console.log(`[Webhook] Saldo deduzido: R$ ${Number(balanceUsed).toFixed(2)} para ${userId}.`);
-                    
+
                     const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
                     const renewalWithBalanceEmbed = new EmbedBuilder()
                         .setTitle('💳 Assinatura Renovada com Saldo')
@@ -1217,7 +1261,7 @@ if (Math.abs(Number(valorPago) - 199.90) < 0.1 || Number(valorPago) === 199) {
                         .addFields(
                             { name: '👤 Usuário', value: `<@${userId}> (ID: ${userId})` },
                             { name: '💰 Saldo Utilizado', value: `R$ ${Number(balanceUsed).toFixed(2)}`, inline: true },
-                            { name: '💸 Valor Pago (PIX)', value: `R$ ${valorPago.toFixed(2)}`, inline: true }
+                            { name: '💸 Valor Pago (PIX)', value: `R$ ${Number(valorPago).toFixed(2)}`, inline: true }
                         )
                         .setTimestamp();
                     await logChannel.send({ embeds: [renewalWithBalanceEmbed] });
@@ -1244,16 +1288,31 @@ if (Math.abs(Number(valorPago) - 199.90) < 0.1 || Number(valorPago) === 199) {
                     console.error("Erro ao enviar log de renovação genérico para LOGS_BOTS_ID:", err);
                 }
             }
+        } catch (error) {
+            console.error('[API] Erro CRÍTICO ao processar webhook do Asaas:', error);
         }
-    }catch (error) {
-        console.error('[API] Erro CRÍTICO ao processar webhook do Mercado Pago:', error);
     }
-}
 });
 
 // Quando o bot estiver online
 client.once('clientReady', async () => {
     console.log(`✅ Bot online como ${client.user.tag}`);
+
+    // --- CÓDIGO TEMPORÁRIO PARA DESCOBRIR O ID ---
+    try {
+        console.log('🔍 Buscando ID do cliente Asaas...');
+        const response = await asaasClient.get('/customers?cpfCnpj=08822469330'); // CPF da sua imagem
+        if (response.data.data && response.data.data.length > 0) {
+            console.log('\n==================================================');
+            console.log('🎯 SEU ASAAS_CUSTOMER_ID_GENERICO É: ', response.data.data[0].id);
+            console.log('==================================================\n');
+        } else {
+            console.log('❌ Cliente não encontrado pelo CPF.');
+        }
+    } catch (e) {
+        console.error('Erro na busca:', e.response ? e.response.data : e.message);
+    }
+    // ----------------------------------------------
 
     const guild = await client.guilds.fetch(GUILD_ID);
 
@@ -1313,7 +1372,7 @@ client.once('clientReady', async () => {
             `Clique nos botões abaixo para gerenciar sua conta:\n\n` +
             `📌 Como funciona?\n\nClique no botão abaixo para adicionar saldo à sua conta.\n\n` +
             `⚠️ Importante!\n\nAntes de fazer qualquer pagamento, lembre-se de que não há reembolsos para adição de créditos. \n\n` +
-            `💰 Valores\n\nPara ativar sua assinatura pela primeira vez, você precisa ter pelo menos R$ 100,00 ou R$ 199,90 de saldo.\n\n` +
+            `💰 Valores\n\nPara ativar sua assinatura pela primeira vez, você precisa ter pelo menos R$ 175,00 ou R$ 500,00 de saldo.\n\n` +
             `💡 *Se você não estiver registrado, clique em **#registrar-se** primeiro.*`
         )
         .setColor('#FFD700');
@@ -1524,7 +1583,7 @@ client.on('interactionCreate', async (interaction) => {
 
             const inputValor = new TextInputBuilder()
                 .setCustomId('valor')
-                .setLabel('Valor desejado (ex: 100 ou 300)')
+                .setLabel('Valor desejado (ex: 175 ou 500)')
                 .setStyle(TextInputStyle.Short)
                 .setPlaceholder('Digite o valor em reais')
                 .setRequired(false);
@@ -1660,81 +1719,66 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
             return;
         }
 
-        const valorInput = parseFloat(valorInputStr.replace(',', '.'));
-
+        const valorInput = parseFloat(valorInputStr);
         if (isNaN(valorInput) || valorInput <= 0) {
             await interaction.editReply({ content: '❌ Por favor, insira um valor numérico válido e positivo.' });
             return;
         }
 
-        const planoSemanal = 100;
-        const targetMensal = 199.90; 
-        
-        // Função que diz "SIM" se o valor for 199.90 (com margem de erro mínima) OU se for 199 redondo
-        const isMensal = (v) => Math.abs(v - targetMensal) < 0.1 || v === 199;
-
+        const planoSemanal = 1;
+        const planoMensal = 2;
         let valorFinalAPagar = 0;
         let saldoUtilizado = 0;
         let duration = 0;
 
         // Busca dados do usuário para verificar histórico
         const userHistoryDoc = await registeredUsers.findOne({ userId });
-        // Verifica se é a primeira compra (histórico vazio ou inexistente)
+        // Verifica se o usuário JÁ TEM algum pagamento registrado no histórico
         const isFirstPurchase = !userHistoryDoc || !userHistoryDoc.paymentHistory || userHistoryDoc.paymentHistory.length === 0;
 
         const balanceDoc = await userBalances.findOne({ userId });
         const saldoDisponivel = balanceDoc ? balanceDoc.balance : 0;
-        
-        // Calcula quanto falta para inteirar o mensal (mínimo de R$ 1)
-        const valorMensalComDesconto = Math.max(1, targetMensal - saldoDisponivel);
+        const valorMensalComDesconto = Math.max(1, planoMensal - saldoDisponivel);
 
-        // --- LÓGICA DE DECISÃO ---
-
-        // 1º CASO: PAGAMENTO COM DESCONTO (SALDO > 0)
-        // Verifica se o valor digitado bate com o cálculo do desconto (aceitando pequena margem de erro)
-        if (saldoDisponivel > 0 && Math.abs(valorInput - valorMensalComDesconto) < 0.1) {
+        // A ordem das verificações foi ajustada para evitar conflitos
+        if (saldoDisponivel > 0 && valorInput === valorMensalComDesconto) {
+            // 1º VERIFICA O PAGAMENTO COM DESCONTO (MENSAL)
             valorFinalAPagar = valorMensalComDesconto;
-            saldoUtilizado = targetMensal - valorFinalAPagar; // O que resta é pago com saldo
+            saldoUtilizado = planoMensal - valorFinalAPagar;
             duration = 30;
-
-        } 
-        // 2º CASO: PAGAMENTO MENSAL CHEIO (199 ou 199,90)
-        else if (isMensal(valorInput)) {
-            valorFinalAPagar = valorInput; // Cobra exatamente o que o usuário digitou
+        } else if (valorInput === planoMensal) {
+            // 2º VERIFICA O PAGAMENTO MENSAL CHEIO
+            valorFinalAPagar = planoMensal;
             saldoUtilizado = 0;
             duration = 30;
-
-        } 
-        // 3º CASO: PAGAMENTO SEMANAL (100)
-        else if (valorInput === planoSemanal) {
+        } else if (valorInput === planoSemanal) {
+            // 3º VERIFICA O PAGAMENTO SEMANAL
             
             // --- TRAVA PARA NOVOS USUÁRIOS ---
             if (isFirstPurchase) {
                 await interaction.editReply({ 
-                    content: `❌ **Atenção!**\n\nComo esta é sua **primeira assinatura**, é necessário contratar o plano **Mensal** (R$ ${targetMensal.toFixed(2).replace('.', ',')}).\n\nO plano Semanal será liberado para você automaticamente nas próximas renovações!` 
+                    content: '❌ **Atenção!**\n\nComo esta é sua **primeira assinatura**, é necessário contratar o plano **Mensal** (R$ 500,00).\n\nO plano Semanal será liberado para você automaticamente nas próximas renovações!' 
                 });
-                return; // Bloqueia e encerra aqui
+                return;
             }
             // ----------------------------------
 
             valorFinalAPagar = planoSemanal;
             saldoUtilizado = 0;
             duration = 7;
-
         } else {
-            // SE NENHUMA CONDIÇÃO FOR ATENDIDA, MOSTRA ERRO COM OS VALORES CERTOS
-            let errorMessage = `❌ Valor inválido de R$ ${valorInput.toFixed(2).replace('.', ',')}.\n\nAs opções de pagamento são:\n`;
+            // SE NENHUMA CONDIÇÃO FOR ATENDIDA, O VALOR É INVÁLIDO
+            let errorMessage = `❌ Valor inválido de R$ ${valorInput.toFixed(2)}.\n\nAs opções de pagamento são:\n`;
             
+            // Exibe mensagem diferente dependendo se é usuário novo ou antigo
             if (isFirstPurchase) {
-                // Mensagem específica para novatos
-                errorMessage += `- **R$ ${targetMensal.toFixed(2).replace('.', ',')}** (Plano Mensal - Obrigatório na 1ª vez)`;
+                errorMessage += `- **R$ ${planoMensal.toFixed(2)}** (Plano Mensal - Obrigatório na 1ª vez)`;
             } else {
-                // Mensagem para veteranos
-                errorMessage += `- **R$ ${planoSemanal.toFixed(2).replace('.', ',')}** (Plano Semanal)\n- **R$ ${targetMensal.toFixed(2).replace('.', ',')}** (Plano Mensal)`;
+                errorMessage += `- **R$ ${planoSemanal.toFixed(2)}** (Plano Semanal)\n- **R$ ${planoMensal.toFixed(2)}** (Plano Mensal)`;
             }
 
             if (saldoDisponivel > 0) {
-                errorMessage += `\n- **R$ ${valorMensalComDesconto.toFixed(2).replace('.', ',')}** (Plano Mensal com seu desconto)`;
+                errorMessage += `\n- **R$ ${valorMensalComDesconto.toFixed(2)}** (Plano Mensal com seu desconto)`;
             }
             await interaction.editReply({ content: errorMessage });
             return;
@@ -1786,7 +1830,7 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
         try {
             // A chamada agora usa as variáveis validadas
             console.log('[Debug] 8. Canal de pagamento definido. Chamando a API do Mercado Pago...');
-            const paymentInfo = await createMercadoPagoPayment(userId, valorFinalAPagar, duration, saldoUtilizado);
+            const paymentInfo = await createAsaasPayment(userId, valorFinalAPagar, duration, saldoUtilizado);
             console.log('[Debug] 9. Resposta da API do Mercado Pago recebida com sucesso.');
             
             const qrCodeBuffer = Buffer.from(paymentInfo.qrCodeBase64, 'base64');
