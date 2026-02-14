@@ -1298,22 +1298,6 @@ app.post('/webhook-asaas', async (req, res) => {
 client.once('clientReady', async () => {
     console.log(`✅ Bot online como ${client.user.tag}`);
 
-    // --- CÓDIGO TEMPORÁRIO PARA DESCOBRIR O ID ---
-    try {
-        console.log('🔍 Buscando ID do cliente Asaas...');
-        const response = await asaasClient.get('/customers?cpfCnpj=08822469330'); // CPF da sua imagem
-        if (response.data.data && response.data.data.length > 0) {
-            console.log('\n==================================================');
-            console.log('🎯 SEU ASAAS_CUSTOMER_ID_GENERICO É: ', response.data.data[0].id);
-            console.log('==================================================\n');
-        } else {
-            console.log('❌ Cliente não encontrado pelo CPF.');
-        }
-    } catch (e) {
-        console.error('Erro na busca:', e.response ? e.response.data : e.message);
-    }
-    // ----------------------------------------------
-
     const guild = await client.guilds.fetch(GUILD_ID);
 
     // Painel de Registro
