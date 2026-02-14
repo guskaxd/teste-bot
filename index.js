@@ -749,7 +749,7 @@ async function checkExpirationNow(userId, expirationDate) {
         console.log(`[Debug] Assinatura de ${userId} expirada. Verificando saldo para renovação automática...`);
         
         // Define o custo do plano
-        const CUSTO_PLANO_MENSAL = 2; 
+        const CUSTO_PLANO_MENSAL = 6; 
     
         // Busca o saldo do usuário
         const balanceDoc = await userBalances.findOne({ userId });
@@ -1087,7 +1087,7 @@ app.post('/webhook-asaas', async (req, res) => {
 
             // 1. Verificamos se o pagamento é o mensal (R$ 500)
             // Nota: O Asaas retorna numbers, então a comparação funciona bem
-            if (Number(valorPago) === 2) {
+            if (Number(valorPago) === 6) {
                 console.log(`[Bônus] Pagamento de R$ 500 detectado para ${userId}. Verificando indicação...`);
 
                 // 2. Buscamos os dados do usuário que pagou para ver se ele foi indicado
@@ -1143,7 +1143,7 @@ app.post('/webhook-asaas', async (req, res) => {
             }
             
             // Lógica de Duração
-            const duration = (Number(valorPago) === 1 || (balanceUsed && Number(valorPago) + Number(balanceUsed) === 1)) ? 7 : 30;
+            const duration = (Number(valorPago) === 5 || (balanceUsed && Number(valorPago) + Number(balanceUsed) === 5)) ? 7 : 30;
 
             let newExpirationDate;
             const existingExpiration = await expirationDates.findOne({ userId });
@@ -1709,8 +1709,8 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
             return;
         }
 
-        const planoSemanal = 1;
-        const planoMensal = 2;
+        const planoSemanal = 5;
+        const planoMensal = 6;
         let valorFinalAPagar = 0;
         let saldoUtilizado = 0;
         let duration = 0;
@@ -1813,9 +1813,9 @@ if (interaction.isModalSubmit() && interaction.customId === 'formulario_saldo') 
 
         try {
             // A chamada agora usa as variáveis validadas
-            console.log('[Debug] 8. Canal de pagamento definido. Chamando a API do Mercado Pago...');
+            console.log('[Debug] 8. Canal de pagamento definido. Chamando a API do Asaas...');
             const paymentInfo = await createAsaasPayment(userId, valorFinalAPagar, duration, saldoUtilizado);
-            console.log('[Debug] 9. Resposta da API do Mercado Pago recebida com sucesso.');
+            console.log('[Debug] 9. Resposta da API do Asaas recebida com sucesso.');
             
             const qrCodeBuffer = Buffer.from(paymentInfo.qrCodeBase64, 'base64');
             const attachment = new AttachmentBuilder(qrCodeBuffer, { name: 'qrcode.png' });
