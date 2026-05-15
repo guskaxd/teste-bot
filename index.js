@@ -43,8 +43,8 @@ const asaasClient = axios.create({
 
 // IDs do servidor
 const GUILD_ID = '1417557260095328438'; 
-const CANAL_PAINEL_ID = '1417583842256224337'; 
-const CATEGORIA_PAGAMENTOS_ID = '1417568378637254857'; 
+const CANAL_PAINEL_ID = '1417583842256224337';
+const CATEGORIA_PAGAMENTOS_ID = '1417568378637254857';
 const REGISTRADO_ROLE_ID = '1417567838192799945';
 const VIP_ROLE_ID = '1417567360545460325';
 const AGUARDANDO_PAGAMENTO_ROLE_ID = '1417567895868932199';
@@ -891,9 +891,6 @@ async function checkExpirationNow(userId, expirationDate) {
         }
     }
 }
-// Lembre-se de colocar isso lá no topo do seu arquivo index.js, junto com os outros requires:
-// const axios = require('axios');
-
 async function auditVipRoles() {
     console.log('[Auditoria] Iniciando auditoria de cargos VIP...');
     try {
@@ -904,19 +901,20 @@ async function auditVipRoles() {
             return;
         }
 
-        await guild.members.fetch(); 
+        // Otimização: Busca direta dos membros do cargo, em vez de todos os membros do servidor.
+        // Isso é muito mais rápido e eficiente em servidores grandes.
+        await guild.members.fetch(); // Garante que o cache de membros do cargo esteja atualizado
         const membersWithVipRole = vipRole.members;
 
         console.log(`[Auditoria] Encontrados ${membersWithVipRole.size} membros com o cargo VIP para verificar.`);
 
-        // 1. Array para guardar os telefones de quem for pego na auditoria
-        let telefonesExpirados = [];
-
         for (const [memberId, member] of membersWithVipRole) {
+            // Para cada membro, verifica se ele tem uma assinatura válida no banco de dados
             const expirationRecord = await expirationDates.findOne({ userId: memberId });
             const now = new Date();
 
             if (!expirationRecord || new Date(expirationRecord.expirationDate) <= now) {
+                // Se não houver registro de assinatura ou se ela já expirou...
                 console.warn(`[Auditoria] INCONSISTÊNCIA ENCONTRADA: Usuário ${member.user.tag} (ID: ${memberId}) possui o cargo VIP, mas não tem uma assinatura ativa. Removendo cargo...`);
                 
                 try {
@@ -924,14 +922,6 @@ async function auditVipRoles() {
                     await member.roles.add(AGUARDANDO_PAGAMENTO_ROLE_ID);
                     console.log(`[Auditoria] Cargo VIP removido e AGUARDANDO_PAGAMENTO adicionado para ${member.user.tag}.`);
                     
-                    // 2. Busca o número do usuário no banco de dados e adiciona na lista
-                    // NOTA: Estou usando 'registeredUsers' baseado nos seus logs anteriores.
-                    // Se o seu banco tiver outro nome para a coleção de usuários, troque aqui.
-                    const userData = await registeredUsers.findOne({ userId: memberId });
-                    if (userData && userData.whatsapp) {
-                        telefonesExpirados.push(userData.whatsapp);
-                    }
-
                     const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
                     if (logChannel) {
                         const embed = new EmbedBuilder()
@@ -949,28 +939,6 @@ async function auditVipRoles() {
                 }
             }
         }
-
-        // 3. Depois que o laço FOR terminar, verifica se alguém foi pego e manda o WhatsApp
-        if (telefonesExpirados.length > 0) {
-            const listaFormatada = telefonesExpirados.map(num => `• ${num}`).join('\n');
-            const mensagem = `🔴 *Relatório de Inativos*\nRemova estes números do grupo VIP:\n\n${listaFormatada}`;
-            
-            const myPhone = process.env.MEU_WHATSAPP;
-            const apiKey = process.env.CALLMEBOT_API_KEY;
-            
-            if (myPhone && apiKey) {
-                const url = `https://api.callmebot.com/whatsapp.php?phone=${myPhone}&text=${encodeURIComponent(mensagem)}&apikey=${apiKey}`;
-                try {
-                    await axios.get(url);
-                    console.log(`[WhatsApp] Relatório com ${telefonesExpirados.length} inativo(s) enviado para o Admin!`);
-                } catch (error) {
-                    console.error('[WhatsApp] Erro ao enviar relatório:', error.message);
-                }
-            } else {
-                console.warn('[WhatsApp] Variáveis MEU_WHATSAPP ou CALLMEBOT_API_KEY não estão configuradas no .env');
-            }
-        }
-
         console.log('[Auditoria] Auditoria de cargos VIP concluída.');
     } catch (err) {
         console.error('[Auditoria] Erro crítico durante a auditoria de cargos VIP:', err);
@@ -1325,13 +1293,59 @@ app.post('/webhook-asaas', async (req, res) => {
         }
     }
 });
+// =================================================================================
+// FUNÇÃO PARA ENVIAR TODOS OS INATIVOS PARA O WHATSAPP
+// =================================================================================
+async function enviarRelatorioCompletoZap() {
+    try {
+        console.log('[WhatsApp] Levantando histórico completo de inativos...');
+        // Busca TODOS os usuários registrados no banco
+        const todosUsuarios = await registeredUsers.find({}).toArray();
+        let telefonesInativos = [];
 
+        for (const user of todosUsuarios) {
+            const exp = await expirationDates.findOne({ userId: user.userId });
+            const now = new Date();
+
+            // Se não tem expiração OU a expiração já passou, e ele tem um whatsapp salvo
+            if ((!exp || new Date(exp.expirationDate) <= now) && user.whatsapp) {
+                telefonesInativos.push(user.whatsapp);
+            }
+        }
+
+        if (telefonesInativos.length > 0) {
+            const listaFormatada = telefonesInativos.map(num => `• ${num}`).join('\n');
+            const textoMsg = `🔴 *LIMPA GERAL (Histórico Completo)*\nTotal de inativos no banco: ${telefonesInativos.length}\n\n${listaFormatada}`;
+            
+            const myPhone = process.env.MEU_WHATSAPP;
+            const apiKey = process.env.CALLMEBOT_API_KEY;
+            
+            if (myPhone && apiKey) {
+                const url = `https://api.callmebot.com/whatsapp.php?phone=${myPhone}&text=${encodeURIComponent(textoMsg)}&apikey=${apiKey}`;
+                await axios.get(url);
+                console.log(`[WhatsApp] Relatório completo com ${telefonesInativos.length} inativos enviado com sucesso!`);
+            } else {
+                console.warn('[WhatsApp] Erro: As variáveis MEU_WHATSAPP ou CALLMEBOT_API_KEY não estão configuradas.');
+            }
+        } else {
+             console.log('[WhatsApp] Nenhum inativo encontrado no banco. Todos estão em dia!');
+        }
+    } catch (err) {
+        console.error('[WhatsApp] Erro ao enviar relatório completo:', err);
+    }
+}
 // Quando o bot estiver online
 client.once('clientReady', async () => {
     console.log(`✅ Bot online como ${client.user.tag}`);
 
     const guild = await client.guilds.fetch(GUILD_ID);
 
+    setTimeout(() => {
+        enviarRelatorioCompletoZap();
+    }, 15000); 
+
+    // (Opcional) Programa para mandar a lista toda segunda-feira ou a cada 7 dias
+    setInterval(enviarRelatorioCompletoZap, 7 * 24 * 60 * 60 * 1000);
     // Painel de Registro
     const canalRegistro = await guild.channels.fetch(CANAL_REGISTRO_ID);
 
