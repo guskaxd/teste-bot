@@ -1343,9 +1343,6 @@ client.once('clientReady', async () => {
     setTimeout(() => {
         enviarRelatorioCompletoZap();
     }, 15000); 
-
-    // (Opcional) Programa para mandar a lista toda segunda-feira ou a cada 7 dias
-    setInterval(enviarRelatorioCompletoZap, 7 * 24 * 60 * 60 * 1000);
     // Painel de Registro
     const canalRegistro = await guild.channels.fetch(CANAL_REGISTRO_ID);
 
