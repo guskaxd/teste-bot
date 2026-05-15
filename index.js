@@ -43,8 +43,8 @@ const asaasClient = axios.create({
 
 // IDs do servidor
 const GUILD_ID = '1417557260095328438'; 
-const CANAL_PAINEL_ID = '1417583842256224337';
-const CATEGORIA_PAGAMENTOS_ID = '1417568378637254857';
+const CANAL_PAINEL_ID = '1417583842256224337'; 
+const CATEGORIA_PAGAMENTOS_ID = '1417568378637254857'; 
 const REGISTRADO_ROLE_ID = '1417567838192799945';
 const VIP_ROLE_ID = '1417567360545460325';
 const AGUARDANDO_PAGAMENTO_ROLE_ID = '1417567895868932199';
@@ -891,6 +891,9 @@ async function checkExpirationNow(userId, expirationDate) {
         }
     }
 }
+// Lembre-se de colocar isso lá no topo do seu arquivo index.js, junto com os outros requires:
+// const axios = require('axios');
+
 async function auditVipRoles() {
     console.log('[Auditoria] Iniciando auditoria de cargos VIP...');
     try {
@@ -901,20 +904,19 @@ async function auditVipRoles() {
             return;
         }
 
-        // Otimização: Busca direta dos membros do cargo, em vez de todos os membros do servidor.
-        // Isso é muito mais rápido e eficiente em servidores grandes.
-        await guild.members.fetch(); // Garante que o cache de membros do cargo esteja atualizado
+        await guild.members.fetch(); 
         const membersWithVipRole = vipRole.members;
 
         console.log(`[Auditoria] Encontrados ${membersWithVipRole.size} membros com o cargo VIP para verificar.`);
 
+        // 1. Array para guardar os telefones de quem for pego na auditoria
+        let telefonesExpirados = [];
+
         for (const [memberId, member] of membersWithVipRole) {
-            // Para cada membro, verifica se ele tem uma assinatura válida no banco de dados
             const expirationRecord = await expirationDates.findOne({ userId: memberId });
             const now = new Date();
 
             if (!expirationRecord || new Date(expirationRecord.expirationDate) <= now) {
-                // Se não houver registro de assinatura ou se ela já expirou...
                 console.warn(`[Auditoria] INCONSISTÊNCIA ENCONTRADA: Usuário ${member.user.tag} (ID: ${memberId}) possui o cargo VIP, mas não tem uma assinatura ativa. Removendo cargo...`);
                 
                 try {
@@ -922,6 +924,14 @@ async function auditVipRoles() {
                     await member.roles.add(AGUARDANDO_PAGAMENTO_ROLE_ID);
                     console.log(`[Auditoria] Cargo VIP removido e AGUARDANDO_PAGAMENTO adicionado para ${member.user.tag}.`);
                     
+                    // 2. Busca o número do usuário no banco de dados e adiciona na lista
+                    // NOTA: Estou usando 'registeredUsers' baseado nos seus logs anteriores.
+                    // Se o seu banco tiver outro nome para a coleção de usuários, troque aqui.
+                    const userData = await registeredUsers.findOne({ userId: memberId });
+                    if (userData && userData.whatsapp) {
+                        telefonesExpirados.push(userData.whatsapp);
+                    }
+
                     const logChannel = await guild.channels.fetch(LOGS_BOTS_ID);
                     if (logChannel) {
                         const embed = new EmbedBuilder()
@@ -939,6 +949,28 @@ async function auditVipRoles() {
                 }
             }
         }
+
+        // 3. Depois que o laço FOR terminar, verifica se alguém foi pego e manda o WhatsApp
+        if (telefonesExpirados.length > 0) {
+            const listaFormatada = telefonesExpirados.map(num => `• ${num}`).join('\n');
+            const mensagem = `🔴 *Relatório de Inativos*\nRemova estes números do grupo VIP:\n\n${listaFormatada}`;
+            
+            const myPhone = process.env.MEU_WHATSAPP;
+            const apiKey = process.env.CALLMEBOT_API_KEY;
+            
+            if (myPhone && apiKey) {
+                const url = `https://api.callmebot.com/whatsapp.php?phone=${myPhone}&text=${encodeURIComponent(mensagem)}&apikey=${apiKey}`;
+                try {
+                    await axios.get(url);
+                    console.log(`[WhatsApp] Relatório com ${telefonesExpirados.length} inativo(s) enviado para o Admin!`);
+                } catch (error) {
+                    console.error('[WhatsApp] Erro ao enviar relatório:', error.message);
+                }
+            } else {
+                console.warn('[WhatsApp] Variáveis MEU_WHATSAPP ou CALLMEBOT_API_KEY não estão configuradas no .env');
+            }
+        }
+
         console.log('[Auditoria] Auditoria de cargos VIP concluída.');
     } catch (err) {
         console.error('[Auditoria] Erro crítico durante a auditoria de cargos VIP:', err);
