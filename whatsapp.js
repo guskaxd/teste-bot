@@ -49,29 +49,41 @@ function iniciarWhatsApp(registeredUsers, expirationDates) {
         try {
             console.log('[WhatsApp] Levantando histórico completo de inativos...');
             const todosUsuarios = await registeredUsers.find({}).toArray();
-            let telefonesInativos = [];
+            let listaInativos = []; // Agora vai guardar nome e telefone
 
             for (const user of todosUsuarios) {
                 const exp = await expirationDates.findOne({ userId: user.userId });
                 const now = new Date();
 
+                // Se não tem expiração OU a data já passou, e ele tem whatsapp salvo
                 if ((!exp || new Date(exp.expirationDate) <= now) && user.whatsapp) {
-                    telefonesInativos.push(user.whatsapp);
+                    // Pega o nome ou coloca "Desconhecido" caso não tenha no banco
+                    const nome = user.name || 'Desconhecido';
+                    listaInativos.push(`• ${nome} - ${user.whatsapp}`);
                 }
             }
 
-            if (telefonesInativos.length > 0) {
-                const listaFormatada = telefonesInativos.map(num => `• ${num}`).join('\n');
-                const textoMsg = `🔴 *LIMPA GERAL (Histórico Completo)*\nTotal de inativos no banco: ${telefonesInativos.length}\n\n${listaFormatada}`;
+            if (listaInativos.length > 0) {
+                const listaFormatada = listaInativos.join('\n');
+                const textoMsg = `🔴 *LIMPA GERAL (Histórico Completo)*\nTotal de inativos no banco: ${listaInativos.length}\n\n${listaFormatada}`;
                 
                 const myPhone = process.env.MEU_WHATSAPP;
                 
                 if (myPhone) {
-                    const chatId = `${myPhone}@c.us`; 
-                    await whatsappClient.sendMessage(chatId, textoMsg);
-                    console.log(`[WhatsApp] Relatório completo enviado com sucesso direto pro seu Zap!`);
+                    console.log(`[WhatsApp] Validando o número ${myPhone} com a API do WhatsApp...`);
+                    
+                    // MÁGICA: Pede pro próprio WhatsApp descobrir se o número tem o 9º dígito ou não
+                    const chatIdValidado = await whatsappClient.getNumberId(myPhone); 
+                    
+                    if (chatIdValidado) {
+                        // Usa a ID exata que o WhatsApp retornou (_serialized)
+                        await whatsappClient.sendMessage(chatIdValidado._serialized, textoMsg);
+                        console.log(`[WhatsApp] Relatório com ${listaInativos.length} inativos enviado com sucesso direto pro seu Zap!`);
+                    } else {
+                        console.error(`[WhatsApp] ERRO: O número ${myPhone} não está registrado no WhatsApp. Verifique se o DDD está correto e se tem o 55.`);
+                    }
                 } else {
-                    console.warn('[WhatsApp] Erro: Variável MEU_WHATSAPP não está configurada.');
+                    console.warn('[WhatsApp] Erro: Variável MEU_WHATSAPP não está configurada no .env.');
                 }
             } else {
                  console.log('[WhatsApp] Nenhum inativo encontrado no banco. Todos estão em dia!');
