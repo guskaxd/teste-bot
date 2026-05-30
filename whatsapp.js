@@ -20,9 +20,15 @@ function iniciarWhatsApp(registeredUsers, expirationDates) {
         }
     });
 
+    let qrCount = 0; // Contador para você saber qual tentativa é
+    
     whatsappClient.on('qr', (qr) => {
+        qrCount++;
+        const agora = new Date().toLocaleTimeString('pt-BR'); // Pega a hora exata
+        
         console.log('\n=============================================================');
-        console.log('📱 CLIQUE NO LINK ABAIXO PARA ABRIR O SEU QR CODE:');
+        console.log(`⏳ [${agora}] TENTATIVA ${qrCount} - NOVO QR CODE GERADO!`);
+        console.log('⚠️ ATENÇÃO: Você tem apenas 15 segundos para escanear este link:');
         console.log(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`);
         console.log('=============================================================\n');
     });
