@@ -18,7 +18,7 @@ const {
 const { MongoClient, ObjectId } = require('mongodb');
 const express = require('express');
 const { MercadoPagoConfig, Payment } = require('mercadopago');
-const { iniciarWhatsApp } = require('./whatsapp');
+const { iniciarWhatsApp } = require('./whatsapp.js');
 require('dotenv').config();
 // Definindo o client antes de usá-lo
 const client = new Client({
