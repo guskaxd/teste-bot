@@ -9,11 +9,10 @@ function iniciarWhatsApp(registeredUsers, expirationDates) {
     const whatsappClient = new WhatsAppClient({
         authStrategy: new LocalAuth(),
         puppeteer: {
-            executablePath: '/usr/bin/chromium', // Diz pro bot usar o navegador do Railway
             args: [
                 '--no-sandbox', 
                 '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage' // Evita que o bot trave por falta de memória RAM
+                '--disable-dev-shm-usage'
             ]
         }
     });
