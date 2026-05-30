@@ -1,13 +1,22 @@
 const { Client: WhatsAppClient, LocalAuth } = require('whatsapp-web.js');
-require('dotenv').config(); 
+require('dotenv').config();
 
 function iniciarWhatsApp(registeredUsers, expirationDates) {
-    console.log('[WhatsApp] Inicializando cliente...');
+    console.log('[WhatsApp] Inicializando cliente com otimização de memória...');
 
     const whatsappClient = new WhatsAppClient({
         authStrategy: new LocalAuth(),
         puppeteer: {
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            // Trava o Chrome para consumir o MÍNIMO de memória possível
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu'
+            ]
         }
     });
 
@@ -18,26 +27,39 @@ function iniciarWhatsApp(registeredUsers, expirationDates) {
         console.log('=============================================================\n');
     });
 
+    // Rastreador 1: Avisa assim que o celular aprovar o QR Code
+    whatsappClient.on('authenticated', () => {
+        console.log('[WhatsApp] 🔐 Autenticado com sucesso! Sincronizando mensagens...');
+    });
+
+    // Rastreador 2: Mostra a porcentagem de carregamento
+    whatsappClient.on('loading_screen', (percent, message) => {
+        console.log(`[WhatsApp] ⏳ Carregando... ${percent}% - ${message}`);
+    });
+
     whatsappClient.on('ready', async () => {
         console.log('[WhatsApp] ✅ Conectado com sucesso ao seu próprio número!');
         
-        // TESTE: Manda um "Oi" para você mesmo para confirmar que conectou!
         const myPhone = process.env.MEU_WHATSAPP;
         if (myPhone) {
             try {
                 const chatIdValidado = await whatsappClient.getNumberId(myPhone); 
                 if (chatIdValidado) {
-                    await whatsappClient.sendMessage(chatIdValidado._serialized, "🤖 *Bot do WhatsApp conectado com sucesso!* Levantando inativos em 15 segundos...");
+                    await whatsappClient.sendMessage(chatIdValidado._serialized, "🤖 *Bot conectado com sucesso!* Levantando inativos em 15 segundos...");
                 }
             } catch (err) {
                  console.log('[WhatsApp] Erro ao enviar mensagem de teste.', err);
             }
         }
 
-        // Manda a lista 15 segundos após conectar no WhatsApp
         setTimeout(() => {
             enviarRelatorioCompletoZap();
         }, 15000);
+    });
+
+    // Rastreador 3: Avisa se for desconectado
+    whatsappClient.on('disconnected', (reason) => {
+        console.log('[WhatsApp] 🔌 Desconectado! Motivo:', reason);
     });
 
     whatsappClient.on('auth_failure', msg => {
@@ -68,12 +90,9 @@ function iniciarWhatsApp(registeredUsers, expirationDates) {
                 
                 if (myPhone) {
                     const chatIdValidado = await whatsappClient.getNumberId(myPhone); 
-                    
                     if (chatIdValidado) {
                         await whatsappClient.sendMessage(chatIdValidado._serialized, textoMsg);
                         console.log(`[WhatsApp] Relatório enviado!`);
-                    } else {
-                        console.error(`[WhatsApp] ERRO: Número ${myPhone} inválido no WhatsApp.`);
                     }
                 } 
             } else {
