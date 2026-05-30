@@ -20,17 +20,24 @@ function iniciarWhatsApp(registeredUsers, expirationDates) {
         }
     });
 
-    let qrCount = 0; // Contador para você saber qual tentativa é
+    let qrCount = 0;
     
     whatsappClient.on('qr', (qr) => {
         qrCount++;
-        const agora = new Date().toLocaleTimeString('pt-BR'); // Pega a hora exata
+        const agora = new Date().toLocaleTimeString('pt-BR'); 
         
-        console.log('\n=============================================================');
-        console.log(`⏳ [${agora}] TENTATIVA ${qrCount} - NOVO QR CODE GERADO!`);
-        console.log('⚠️ ATENÇÃO: Você tem apenas 15 segundos para escanear este link:');
-        console.log(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`);
-        console.log('=============================================================\n');
+        if (qr) {
+            const qrLink = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`;
+            
+            console.log('\n=============================================================');
+            console.log(`⏳ [${agora}] TENTATIVA ${qrCount} - NOVO QR CODE`);
+            console.log('⚠️ O WhatsApp invalida a chave a cada 20 segundos.');
+            console.log('🔗 CLIQUE NO LINK ABAIXO AGORA E ESCANEIE:');
+            console.log(qrLink);
+            console.log('=============================================================\n');
+        } else {
+            console.log(`[${agora}] O WhatsApp enviou um payload vazio para o QR Code.`);
+        }
     });
 
     // Rastreador 1: Avisa assim que o celular aprovar o QR Code
