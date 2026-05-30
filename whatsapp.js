@@ -19,9 +19,16 @@ function iniciarWhatsApp(registeredUsers, expirationDates) {
 
     whatsappClient.on('qr', (qr) => {
         console.log('\n=============================================================');
-        console.log('📱 ESCANEIE O QR CODE ABAIXO NO SEU WHATSAPP (Aparelhos Conectados)');
+        console.log('📱 CLIQUE NO LINK ABAIXO PARA ABRIR O SEU QR CODE:');
+        
+        // Gera um link direto com a imagem perfeita do QR Code
+        const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`;
+        console.log(qrCodeUrl);
+        
         console.log('=============================================================\n');
-        qrcode.generate(qr, { small: true });
+        
+        // (Opcional) Mantém o do terminal caso queira tentar o truque do zoom
+        qrcode.generate(qr, { small: true }); 
     });
 
     whatsappClient.on('ready', () => {
